@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from conftest import SECTIONS
 
@@ -173,6 +175,39 @@ def test_an_unterminated_fence_hides_the_headings_after_it() -> None:
 
 def test_word_count_counts_only_tokens_with_a_letter_or_digit() -> None:
     assert pr_format.word_count("## Why\n\n- one | 2 |\n- --- __ é") == 4
+
+
+def test_word_count_takes_linear_time_on_a_long_run_of_punctuation() -> None:
+    start = time.perf_counter()
+    assert pr_format.word_count("-" * 65536 + " one-two --three-- _4_") == 3
+    assert time.perf_counter() - start < 0.5
+
+
+def test_a_description_over_the_character_limit_gets_one_problem_before_any_pattern() -> None:
+    body = BODY + " " * (pr_format.MAX_CHARS + 1 - len(BODY))
+    assert pr_format.check("Add, fixes #9", body, "main", ["uv.lock"]) == [
+        "the description has 65537 characters; the limit is 65536"
+    ]
+    assert pr_format.check("Add", body[:-1], "agent/issue-7", []) == []
+
+
+@pytest.mark.parametrize("block", ["```\necho `date\n```", "- ~~~\n  echo `date\n  ~~~"])
+def test_a_stray_backtick_above_a_fence_leaves_the_headings_intact(block: str) -> None:
+    body = BODY.replace("```\nmake check\n```", f"A stray ` in the prose.\n{block}")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+    assert pr_format.word_count(body) == pr_format.word_count(BODY) + 5
+
+
+@pytest.mark.parametrize("prefix", ["", "- ", "2. "])
+def test_a_line_that_starts_with_a_triple_backtick_span_is_not_a_fence(prefix: str) -> None:
+    body = BODY.replace("```\nmake check\n```", f"{prefix}```make check``` and `make test` passed.")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+    assert pr_format.word_count(body) == pr_format.word_count(BODY) + 6 + bool(prefix.strip("- "))
+
+
+def test_a_fence_of_four_backticks_holds_a_line_of_three() -> None:
+    body = BODY.replace("```\nmake check\n```", "````\n```\n## Why\n```\n````")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
 
 
 def test_a_description_over_the_word_limit_states_its_count() -> None:

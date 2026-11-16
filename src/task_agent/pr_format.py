@@ -11,8 +11,10 @@ CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#\d+)[ \t]*$", re.M)
 MAX_FILES = 3000
 MAX_WORDS = 250
 HEADINGS = ["Why", "What changed", "Evidence", "Not done", "After merge", "Lessons"]
-FENCE = r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(```|~~~).*?(?:^[ \t]*\2|\Z)"
-INLINE = r"(?<!`)(`+)(?!`)(?:[^\n]|\n(?!\n))+?(?<!`)\4(?!`)"
+MAX_CHARS = 65536
+OPEN = r"[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(```+(?![^\n]*`)|~~~)"
+FENCE = rf"^{OPEN}.*?(?:^[ \t]*\2|\Z)"
+INLINE = rf"(?<!`)(`+)(?!`)(?:[^\n]|\n(?!\n|{OPEN}))+?(?<!`)\4(?!`)"
 SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->", re.M | re.S)
 SECTION = re.compile(r"^##[ \t]+(.*?)[ \t]*$(.*?)(?=^##[ \t]|\Z)", re.M | re.S)
 
@@ -24,7 +26,7 @@ def visible(body: str, fence: str) -> str:
 
 def word_count(body: str) -> int:
     """The words in a description, not counting fenced code blocks and HTML comments."""
-    return len(re.findall(r"\S*[^\W_]\S*", visible(body, " ")))
+    return len(re.findall(r"[^\W_]\S*", visible(body, " ")))
 
 
 def protected(path: str) -> bool:
@@ -35,6 +37,8 @@ def protected(path: str) -> bool:
 
 def check(title: str, body: str, branch: str, files: list[str]) -> list[str]:
     """Problems with an App pull request; an empty list means it passes."""
+    if len(body) > MAX_CHARS:
+        return [f"the description has {len(body)} characters; the limit is {MAX_CHARS}"]
     problems, body = [], body.replace("\r\n", "\n")
     if changed := sorted(path for path in files if protected(path)):
         problems.append("agent pull requests may not change: " + ", ".join(changed))
