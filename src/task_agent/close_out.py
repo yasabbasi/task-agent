@@ -28,11 +28,12 @@ def lessons(text: str) -> list[str]:
 
 
 def file_lessons(repo: str, rules: list[str], url: str) -> bool:
-    """Open a triage issue for up to MAX_LESSONS rules no open issue's body starts with."""
+    """Open a triage issue for up to MAX_LESSONS rules no open lesson's title or body holds."""
     listing = ("issue", "list", "--repo", repo, "--state", "open", "--limit", "1000")
-    if (found := tried(*listing, "--json", "title,body")) is None:
+    if (found := tried(*listing, "--label", "lesson", "--json", "title,body")) is None:
         return False
-    known = {issue["body"].replace("\r\n", "\n").split("\n\n")[0] for issue in json.loads(found)}
+    rows = json.loads(found)
+    known = {text.replace("\r\n", "\n").split("\n\n")[0] for row in rows for text in row.values()}
     new = [rule for rule in dict.fromkeys(rules) if rule not in known]
     if (left_out := len(new) - MAX_LESSONS) > 0:
         print(f"left out {left_out} lessons; at most {MAX_LESSONS} are filed")

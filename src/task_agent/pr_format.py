@@ -6,7 +6,9 @@ ROOT_ONLY = {".github", "prompts", "makefile", "gnumakefile", "pyproject.toml", 
 ROOT_ONLY |= {".python-version", ".python-versions"}
 ANY_DEPTH = {".claude", ".mcp.json", "claude.md", "claude.local.md"}
 BRANCH = re.compile(r"agent/issue-(\d+)")
-ISSUE = r"(?:[\w.-]+/[\w.-]+)?#\d+|GH-\d+|https?://github\.com/\S+/(?:issues|pull)/\d+"
+ISSUE = (
+    r"(?:[\w.-]{1,39}+/[\w.-]{1,100}+)?+#\d+|GH-\d+|https?://github\.com/\S+/(?:issues|pull)/\d+"
+)
 CLOSING = re.compile(rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*+:?\s*+({ISSUE})", re.I)
 CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#[0-9]+)[ \t]*$", re.M)
 MAX_FILES = 3000
@@ -17,11 +19,11 @@ OPENS = r"[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(`{3,}+(?![^\n]*`)|~{3,})"
 FENCE = rf"^{OPENS}.*?(?:^[ \t]*\2(?:(?<=`)`|(?<=~)~)*+[ \t]*$|\Z)"
 STOPS = rf"\n(?!\n|{OPENS}|[ \t]*<!--)"
 INLINE = rf"(?<!`)(`+)(?!`)(?:[^`\n]++|(?!\4(?!`))`++|{STOPS})*+\4(?!`)"
-SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->|^<!--.*", re.M | re.S)
+SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--(?:-?>|.*?-->)|^ {{0,3}}<!--.*", re.M | re.S)
 SECTION = re.compile(
     r"^##[ \t]++((?:[ \t]*+[^ \t\n]++)*+)[ \t]*+$(.*?)(?=^##[ \t]|\Z)", re.M | re.S
 )
-BREAK = re.compile(r"\n(?!#{1,6}[ \t])")
+BREAK = re.compile(r"(^#{1,6}[ \t].*\n)|\n(?!#{1,6}[ \t])", re.M)
 
 
 def visible(body: str, fence: str) -> str:
@@ -29,7 +31,10 @@ def visible(body: str, fence: str) -> str:
     if len(body) > MAX_CHARS:
         return ""
     return SKIPPED.sub(
-        lambda skipped: fence if skipped[1] else BREAK.sub(" ", skipped[3] or " "), body
+        lambda skipped: (
+            fence if skipped[1] else BREAK.sub(lambda kept: kept[1] or " ", skipped[3] or " ")
+        ),
+        body,
     )
 
 
