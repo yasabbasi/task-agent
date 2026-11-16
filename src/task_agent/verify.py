@@ -35,7 +35,7 @@ def refused(action: Callable[[], object]) -> bool:
     try:
         action()
     except subprocess.CalledProcessError as exc:
-        return "[remote rejected]" in (exc.stderr or "")
+        return any(sign in (exc.stderr or "") for sign in ("[remote rejected]", "remote: error:"))
     except urllib.error.HTTPError as exc:
         return exc.code < 500
     return False

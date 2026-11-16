@@ -184,6 +184,7 @@ def test_only_a_refusal_from_github_counts_as_refused() -> None:
 
     rejected = " ! [remote rejected] HEAD -> main (push declined due to repository rule violations)"
     assert fail(subprocess.CalledProcessError(1, ["git", "push"], stderr=rejected))
+    assert fail(subprocess.CalledProcessError(1, ["git", "push"], stderr="remote: error: GH013: x"))
     assert not fail(subprocess.CalledProcessError(128, ["git", "push"], stderr="Could not resolve"))
     assert fail(urllib.error.HTTPError("u", 422, "Unprocessable", Message(), None))
     assert not fail(urllib.error.HTTPError("u", 503, "Unavailable", Message(), None))
