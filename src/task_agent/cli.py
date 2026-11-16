@@ -43,8 +43,7 @@ def cmd_pr_check(args: argparse.Namespace) -> int:
 
 
 def cmd_close_out(args: argparse.Namespace) -> int:
-    close_out.run_event(args.event, args.bot or config.load().bot)
-    return 0
+    return close_out.run_event(args.event, args.bot or config.load().bot)
 
 
 def loaded(args: argparse.Namespace) -> tuple[App, config.Config, config.Config]:

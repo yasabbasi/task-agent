@@ -1,5 +1,7 @@
 import json
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import SECTIONS
@@ -14,32 +16,47 @@ Calls = list[tuple[tuple[str, ...], str | None]]
 
 
 class FakeGh:
-    """Records every gh call; answers the title listing and the label lookup."""
+    """Records every gh call; answers the title listing and the state and label lookup."""
 
-    def __init__(self, titles: tuple[str, ...] = (), labels: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        titles: tuple[str, ...] = (),
+        labels: tuple[str, ...] = (),
+        state: str = "CLOSED",
+        fails: tuple[str, ...] = (),
+    ) -> None:
         self.calls: Calls = []
-        self.titles, self.labels = titles, labels
+        self.titles, self.labels, self.state, self.fails = titles, labels, state, fails
 
     def __call__(self, *args: str, input: str | None = None) -> str:
         self.calls.append((args, input))
-        answers = {"list": self.titles, "view": self.labels}
+        if args[1] in self.fails:
+            raise subprocess.CalledProcessError(1, ["gh", *args], stderr=f"no {args[1]} today\n")
+        answers = {"list": self.titles, "view": (self.state, *self.labels)}
         return "".join(f"{line}\n" for line in answers.get(args[1], ()))
 
     def made(self, *start: str) -> Calls:
         return [(args, input) for args, input in self.calls if args[: len(start)] == start]
 
 
-def fake(monkeypatch: pytest.MonkeyPatch, **answers: tuple[str, ...]) -> FakeGh:
+def fake(monkeypatch: pytest.MonkeyPatch, **answers: Any) -> FakeGh:
     gh = FakeGh(**answers)
     monkeypatch.setattr(close_out, "gh", gh)
     return gh
 
 
-def write_event(folder: Path, body: str | None = BODY, merged: bool = True, by: str = BOT) -> str:
+def write_event(
+    folder: Path, body: str | None = BODY, merged: bool = True, by: str = BOT, base: str = "main"
+) -> str:
     pr = {"number": 12, "merged": merged, "body": body, "html_url": URL, "user": {"login": by}}
+    repo = {"full_name": "o/r", "default_branch": "main"}
     path = folder / "event.json"
-    path.write_text(json.dumps({"pull_request": pr, "repository": {"full_name": "o/r"}}))
+    path.write_text(json.dumps({"pull_request": pr | {"base": {"ref": base}}, "repository": repo}))
     return str(path)
+
+
+def titles_filed(gh: FakeGh) -> list[str]:
+    return [args[5] for args, _ in gh.made("issue", "create")]
 
 
 def test_lessons_reads_rule_lines_only_under_the_lessons_heading() -> None:
@@ -48,9 +65,90 @@ def test_lessons_reads_rule_lines_only_under_the_lessons_heading() -> None:
     assert close_out.lessons(SECTIONS) == []
 
 
-def test_lessons_skips_rule_lines_inside_code_fences() -> None:
-    body = SECTIONS.replace("None\n", "```\nrule: quoted\n```\nrule: real\n")
-    assert close_out.lessons(body) == ["real"]
+def test_rule_lines_inside_code_fences_and_comments_are_not_filed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch)
+    hidden = "```\nrule: quoted\n```\n<!--\nrule: unseen\n-->\nrule: real\n"
+    close_out.run_event(write_event(tmp_path, SECTIONS.replace("None\n", hidden)), BOT)
+    assert titles_filed(gh) == ["real"]
+
+
+def test_closing_lines_inside_code_fences_and_comments_are_ignored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch, labels=("status:review",))
+    body = "Closes #7\n\n<!--\nCloses #8\n-->\n\n```\nCloses #9\n```\n"
+    close_out.run_event(write_event(tmp_path, body), BOT)
+    assert [args[2] for args, _ in gh.made("issue", "view")] == ["7"]
+
+
+def test_a_merge_into_another_branch_keeps_status_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch, labels=("status:review",))
+    close_out.run_event(write_event(tmp_path, "Closes #7\n", base="release"), BOT)
+    assert gh.calls == []
+
+
+def test_an_issue_that_is_not_closed_keeps_its_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = fake(monkeypatch, labels=("status:review",), state="OPEN")
+    assert close_out.run_event(write_event(tmp_path, "Closes #7\n"), BOT) == 0
+    assert not gh.made("issue", "edit")
+    assert capsys.readouterr().out == "#7 is not closed, so its labels were kept\n"
+
+
+def test_at_most_five_new_rules_are_filed_and_the_rest_counted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = fake(monkeypatch, titles=("r0", "r1"))
+    body = SECTIONS.replace("None\n", "".join(f"rule: r{n}\n" for n in range(9)))
+    close_out.run_event(write_event(tmp_path, body), BOT)
+    assert titles_filed(gh) == ["r2", "r3", "r4", "r5", "r6"]
+    assert capsys.readouterr().out == "left out 2 lessons; at most 5 are filed\n"
+
+
+def test_rules_are_compared_by_full_text_with_titles_split_on_newlines_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch, titles=("a\x0cb", LONG[:72].strip()))
+    body = SECTIONS.replace("None\n", f"rule: a\x0cb\nrule: a\nrule: {LONG}x\nrule: {LONG}y\n")
+    close_out.run_event(write_event(tmp_path, body), BOT)
+    assert [text for _, text in gh.made("issue", "create")] == [
+        f"{rule}\n\n{URL}" for rule in ("a", f"{LONG}x", f"{LONG}y")
+    ]
+
+
+def test_status_and_the_author_label_are_handled_before_lessons(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch, labels=("status:review",))
+    close_out.run_event(write_event(tmp_path, by="yas"), BOT)
+    assert [args[:2] for args, _ in gh.calls] == [
+        ("issue", "view"),
+        ("issue", "edit"),
+        ("pr", "edit"),
+        ("issue", "list"),
+        ("issue", "create"),
+        ("issue", "create"),
+    ]
+
+
+@pytest.mark.parametrize("failing", ["view", "edit", "list", "create"])
+def test_a_failed_gh_call_is_printed_and_the_rest_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failing: str,
+) -> None:
+    gh = fake(monkeypatch, labels=("status:review",), fails=(failing,))
+    event = write_event(tmp_path, "Closes #7\nCloses #9\n\n" + BODY, by="yas")
+    assert cli.main(["close-out", "--event", event, "--bot", BOT]) == 1
+    assert f"no {failing} today" in capsys.readouterr().out
+    assert len(gh.made("issue", "view")) == 2 and gh.made("pr", "edit") and gh.made("issue", "list")
+    assert failing == "list" or len(gh.made("issue", "create")) == 2
 
 
 def test_each_rule_becomes_a_triage_lesson_issue(
@@ -153,5 +251,9 @@ def test_gh_is_called_without_a_shell(monkeypatch: pytest.MonkeyPatch, tmp_path:
         return Done()
 
     monkeypatch.setattr("subprocess.run", run)
-    close_out.run_event(write_event(tmp_path, body="rule: $(x); y", by="yas"), BOT)
+    body = SECTIONS.replace("None\n", "rule: $(x); y\n")
+    close_out.run_event(write_event(tmp_path, body, by="yas"), BOT)
     assert ran and all(argv[0] == "gh" and not kwargs.get("shell") for argv, kwargs in ran)
+    (create,) = [argv for argv, _ in ran if argv[1:3] == ["issue", "create"]]
+    assert create[5:7] == ["--title", "$(x); y"]
+    assert ran[-1][1]["input"] == f"$(x); y\n\n{URL}"
