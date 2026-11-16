@@ -42,7 +42,8 @@ install-skill: ## Link /task into ~/.claude/skills so it works in any repo
 	mkdir -p ~/.claude/skills
 	ln -sfn $(CURDIR)/.claude/skills/task ~/.claude/skills/task
 
-# The next five targets use the App's key. Run them in your own terminal: they need Touch ID.
+# The next five targets use the App's key. Run them in your own terminal: reading the key may
+# ask you to unlock it.
 
 doctor: ## Check that this machine can run agents, with a fix for each failure
 	uv run python scripts/doctor.py
