@@ -14,6 +14,7 @@ import urllib.error
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -334,6 +335,29 @@ def commit(cfg: Config, worktree: Path, api: Api, title: str, result: Json) -> l
     return [name for name in names.split("\0") if name]
 
 
+def repair(
+    cfg: Config, worktree: Path, number: int, body: str, problems: list[str], result: Json
+) -> Json:
+    """One short session that rewrites a failing description; its result, with the totals so far."""
+    old = result["structured_output"]
+    prompt = (
+        f"The pull request description for issue #{number} fails its check. Rewrite it and return "
+        "it as pr_body, with the same pr_title. Change no files.\n\nProblems:\n"
+        + "\n".join(f"- {p}" for p in problems)
+        + f"\n\nIt has {pr_format.word_count(body)} words; aim for 200.\n\n"
+        f"<description>\n{old['pr_body']}\n</description>"
+    )
+    try:
+        new = run_agent(replace(cfg, max_turns=5), worktree, number, prompt)
+    except Blocked as exc:  # a failed follow-up leaves the description as it was
+        if CANCEL.is_set():
+            raise
+        new = exc.result | {"structured_output": old}
+    for key in ("total_cost_usd", "num_turns", "duration_ms"):
+        new[key] = (result.get(key) or 0) + (new.get(key) or 0)
+    return new
+
+
 def publish(app: App, cfg: Config, worktree: Path, gitfile: str, number: int, result: Json) -> str:
     """Commit, check, push and open the pull request; return what to print."""
     if (worktree / ".git").read_text() != gitfile:
@@ -342,6 +366,12 @@ def publish(app: App, cfg: Config, worktree: Path, gitfile: str, number: int, re
     branch, out = f"agent/issue-{number}", result["structured_output"]
     title, body = one_line(out["pr_title"]), pr_body(out["pr_body"], number, result)
     files = commit(cfg, worktree, api, title, result)
+    for _ in range(2):
+        found = pr_format.check(title, body, branch, files)
+        if not found or not all(p.startswith("the description") for p in found):
+            break
+        result = repair(cfg, worktree, number, body, found, result)
+        body = pr_body(result["structured_output"]["pr_body"], number, result)
     problems = "\n".join(f"- {p}" for p in pr_format.check(title, body, branch, files))
     if any(pr_format.protected(path) for path in files):
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)

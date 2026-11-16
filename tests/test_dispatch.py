@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from conftest import BOT, CFG, SECTIONS, FakeApi, FakeApp, approval, result, run_git
 
-from task_agent import config, dispatch
+from task_agent import config, dispatch, pr_format
 
 Plan = Callable[..., Path]
 
@@ -229,6 +229,7 @@ def test_a_task_goes_from_claim_to_pull_request(
     assert log == f"{BOT} <42+{BOT}@users.noreply.github.com> Add a file"
     assert run_git(github, "show", "agent/issue-7:src/new.py") == "x = 1\n"
     assert not (cfg.clone / ".worktrees" / "issue-7").exists()
+    assert len(json.loads(calls.read_text())) == 1
     argv = json.loads(calls.read_text())[0]
     for flag in ("--restricted", "--strict-mcp-config", "--disable-slash-commands"):
         assert flag in argv
@@ -255,17 +256,60 @@ def test_a_change_to_a_protected_path_is_blocked_before_any_push(
     assert not api.posted("/pulls")
 
 
-def test_a_description_that_closes_another_issue_is_blocked_with_a_link_to_the_branch(
+def test_a_failing_description_is_rewritten_in_a_follow_up_before_publishing(
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
-    claude({"files": {"a.txt": "x\n"}, "output": [result(body=SECTIONS + "Also fixes #99.")]})
+    fixed = result(body=SECTIONS.replace("Because.", "Rewritten."))
+    calls = claude(
+        {"files": {"a.txt": "x\n"}, "output": [result(body=SECTIONS + "word " * 300)]},
+        {"files": {"late.txt": "y\n", "a.txt": "changed\n"}, "output": [fixed]},
+    )
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line == "#7: opened https://example/pull/1"
+    body = api.posted("/pulls")[0]["body"]
+    assert "Rewritten." in body and "word word" not in body
+    assert body.endswith("<!-- task-agent:run cost=0.85 turns=6 secs=123 -->\n")
+    first, second = json.loads(calls.read_text())
+    assert first[first.index("--max-turns") + 1] == "40"
+    assert second[second.index("--max-turns") + 1] == "5"
+    words = pr_format.word_count(dispatch.pr_body(SECTIONS + "word " * 300, 7, {}))
+    assert f"- the description has {words} words; the limit is 250" in second[1]
+    assert f"It has {words} words; aim for 200." in second[1] and "Change no files." in second[1]
+    assert "late.txt" not in run_git(github, "ls-tree", "--name-only", "agent/issue-7")
+    assert run_git(github, "show", "agent/issue-7:a.txt") == "x\n"
+
+
+def test_a_description_still_failing_after_two_follow_ups_is_blocked_with_a_link_to_the_branch(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    bad = result(body=SECTIONS + "Also fixes #99.")
+    calls = claude(
+        {"files": {"a.txt": "x\n"}, "output": [bad]},
+        {"output": [result(subtype="error_max_turns")]},
+        {"output": [bad]},
+    )
     api = ready_api()
     line = dispatch.work(FakeApp(api), cfg, issue(7))
     assert line.startswith("#7: blocked (the work is on https://github.com/owner/repo/tree/agent/")
-    assert "#99" in api.posted("/issues/7/comments")[0]["body"]
+    comment = api.posted("/issues/7/comments")[0]["body"]
+    assert "#99" in comment and "cost=1.27 turns=9 secs=184" in comment
+    assert len(json.loads(calls.read_text())) == 3
     assert "agent/issue-7" in run_git(github, "branch", "--list")
     assert not api.posted("/pulls")
+
+
+def test_a_title_that_fails_starts_no_follow_up(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    output = {"pr_title": "Fix #99", "pr_body": SECTIONS}
+    calls = claude({"files": {"a.txt": "x\n"}, "output": [result(structured_output=output)]})
+    line = dispatch.work(FakeApp(ready_api()), cfg, issue(7))
+    assert line.startswith("#7: blocked (the work is on")
+    assert len(json.loads(calls.read_text())) == 1
 
 
 @pytest.mark.parametrize(
