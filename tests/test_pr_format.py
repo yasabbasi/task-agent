@@ -204,6 +204,53 @@ def test_word_count_reads_a_long_run_of_punctuation_quickly() -> None:
     assert time.perf_counter() - started < 1
 
 
+def test_word_count_reads_a_long_run_of_punctuation_with_no_letter_quickly() -> None:
+    started = time.perf_counter()
+    assert pr_format.word_count("-" * pr_format.MAX_CHARS) == 0
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize("start", ["fix", "fix:", "## ", "## a"])
+@pytest.mark.parametrize("gap", [" ", "\n"])
+def test_a_long_run_of_spaces_or_newlines_after_a_keyword_or_heading_is_read_quickly(
+    start: str, gap: str
+) -> None:
+    body = start + gap * (65_000 - len(start) - 1) + "b"
+    started = time.perf_counter()
+    assert pr_format.check("Add", body, "agent/issue-7", [])
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "```\n```python\n## Why\n``` text\n## Output\n```",
+        "~~~\n~~~sh\n## Why\n  ~~~ \t",
+        "- Run:\n\n    ```\n    ## Why\n    ```",
+        "- Run:\n\n\t```\n\t## Why\n\t```",
+    ],
+)
+def test_a_fence_closes_only_at_a_line_holding_the_marker_alone(block: str) -> None:
+    body = BODY.replace("```\nmake check\n```", block)
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+
+
+def test_line_breaks_inside_an_inline_code_span_become_spaces() -> None:
+    body = "a `b\nCloses #9\nrule: x\n## Why` c\nd"
+    assert pr_format.visible(body, "```") == "a `b Closes #9 rule: x ## Why` c\nd"
+
+
+def test_an_unclosed_comment_that_starts_a_line_hides_the_rest() -> None:
+    body = "a\n  <!-- c -->d\n<!-- e\n\n## Why\nrule: x"
+    assert pr_format.visible(body, "") == "a\n d\n "
+    assert pr_format.visible("a <!-- b\n## Why", "") == "a <!-- b\n## Why"
+    assert pr_format.check("Add", BODY + "<!--\n## Notes\n", "agent/issue-7", []) == []
+
+
+def test_a_closing_line_matches_ascii_digits_only() -> None:
+    assert pr_format.CLOSING_LINE.findall("Closes #７\nCloses #7\n") == ["#7"]
+
+
 def test_a_description_over_the_character_limit_gets_one_problem_and_is_not_parsed() -> None:
     body = "fixes #99 `" * 6000
     assert pr_format.check("Add, fixes #9", body, "agent/issue-7", ["uv.lock"]) == [
