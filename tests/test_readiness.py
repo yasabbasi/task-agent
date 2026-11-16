@@ -1,5 +1,6 @@
 import io
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -64,6 +65,34 @@ def test_depends_on_reads_issues_in_this_repo_and_in_others() -> None:
     fields = readiness.parse_body(BODY.replace("_No response_", "#12, owner/other#3\n- #12"))
     assert readiness.depends_on(fields, "o/r") == [("o/r", 12), ("owner/other", 3)]
     assert readiness.depends_on(readiness.parse_body(BODY), "o/r") == []
+
+
+def depends(text: str) -> list[tuple[str, int]]:
+    return readiness.depends_on({"depends": text}, "o/r")
+
+
+def test_depends_on_reads_an_issue_url() -> None:
+    text = "https://github.com/owner/other/issues/3 and (https://github.com/o/r/issues/12)"
+    assert depends(text) == [("owner/other", 3), ("o/r", 12)]
+
+
+@pytest.mark.parametrize("text", ["abc#12", "ownér/repo#3", "é/b#3", "a/b/c#3", "#١٢"])
+def test_depends_on_skips_a_number_after_other_text_and_names_outside_ascii(text: str) -> None:
+    assert depends(text) == []
+
+
+@pytest.mark.parametrize("unit", ["a", "a/", "a/a", "#", "a#", "é/a#", "https://github.com/a"])
+def test_depends_on_is_fast_on_the_longest_description(unit: str) -> None:
+    text = (unit * 65_536)[:65_536]
+    began = time.perf_counter()
+    depends(text)
+    assert time.perf_counter() - began < 0.1
+
+
+def test_depends_on_text_that_names_no_issue_fails_the_check() -> None:
+    body = BODY.replace("_No response_", "the login work")
+    results = readiness.check(readiness.parse_body(body), always)
+    assert results[-1] == (False, "Depends on names an issue as `#N`, `owner/repo#N` or its URL")
 
 
 def test_the_comment_gains_a_pass_line_naming_the_dependencies() -> None:

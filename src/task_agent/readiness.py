@@ -23,6 +23,8 @@ CHOICES = {
     "effort": ("s", "m", "l"),
 }
 Result = tuple[bool, str]
+NAME = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+DEPENDS = re.compile(rf"(?<![\w./-])(?:https://github\.com/({NAME})/issues/|({NAME})?#)([0-9]+)")
 
 
 def parse_body(body: str | None) -> dict[str, str]:
@@ -47,9 +49,9 @@ def path_checker(root: Path) -> Callable[[str], bool]:
 
 
 def depends_on(fields: dict[str, str], repo: str) -> list[tuple[str, int]]:
-    """The (repo, number) of each issue named in Depends on, as `#N` or `owner/repo#N`."""
-    found = re.findall(r"([\w.-]+/[\w.-]+)?#(\d+)", fields["depends"])
-    return list(dict.fromkeys((other or repo, int(number)) for other, number in found))
+    """The (repo, number) of each issue named in Depends on, as `#N`, `owner/repo#N` or a URL."""
+    found = DEPENDS.findall(fields["depends"])
+    return list(dict.fromkeys((url or other or repo, int(n)) for url, other, n in found))
 
 
 def check(fields: dict[str, str], exists: Callable[[str], bool]) -> list[Result]:
@@ -65,14 +67,14 @@ def check(fields: dict[str, str], exists: Callable[[str], bool]) -> list[Result]
     else:
         start = f"Starting point paths exist ({len(paths)} checked)"
     needs = ", ".join(f"{repo}#{number}" for repo, number in depends_on(fields, ""))
+    waits = f"Depends on {needs}, and waits until each is closed as completed"
+    if not needs:
+        waits = "Depends on names an issue as `#N`, `owner/repo#N` or its URL"
     return [
         (3 <= words <= 80, f"What is stated in 3 to 80 words ({words})"),
         (bool(items), f"Done when has at least one checklist item ({len(items)})"),
         (bool(paths) and not missing, start),
-        *(
-            [(True, f"Depends on {needs}, and waits until each is closed as completed")]
-            * bool(needs)
-        ),
+        *([(bool(needs), waits)] * bool(fields["depends"])),
     ]
 
 

@@ -425,9 +425,94 @@ def test_a_cancel_during_a_follow_up_puts_the_task_back_with_nothing_pushed(
     assert not api.posted("/issues/7/comments")
 
 
+def test_a_follow_up_whose_setup_fails_during_a_cancel_puts_the_task_back(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    monkeypatch.setattr(dispatch, "CANCEL", threading.Event())
+    seen, real = list[Path](), dispatch.agent_settings
+
+    def killed(cfg: config.Config, worktree: Path) -> str:
+        seen.append(worktree)
+        if len(seen) == 2:
+            threading.Timer(0.2, dispatch.cancel).start()
+            raise subprocess.CalledProcessError(-2, "git")
+        return real(cfg, worktree)
+
+    monkeypatch.setattr(dispatch, "agent_settings", killed)
+    claude({"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]})
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line == "#7: cancelled, back to status:ready" and len(seen) == 2
+    assert "agent/issue-7" not in run_git(github, "branch", "--list")
+    assert not api.posted("/issues/7/comments")
+
+
+def test_the_last_follow_up_rewriting_the_git_file_gets_nothing_pushed(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    pushes = list[str]()
+    monkeypatch.setattr(dispatch, "push", lambda *args, **kwargs: pushes.append(args[3]))
+    calls = claude(
+        {"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]},
+        {"output": [result(body=BAD)]},
+        {"files": {".git": "gitdir: /elsewhere\n"}, "output": [result()]},
+    )
+    line = dispatch.work(FakeApp(ready_api()), cfg, issue(7))
+    assert line == "#7: blocked (the worktree's .git file was changed)"
+    assert not pushes and len(json.loads(calls.read_text())) == 3
+
+
+def test_the_check_before_a_follow_up_reads_the_lock_from_the_worktrees_commit(
+    cfg: config.Config, github: Path
+) -> None:
+    worktree, gitfile = dispatch.prepare(cfg, 7, "t")
+    (cfg.clone / "uv.lock").write_text("")
+    run_git(cfg.clone, "add", "uv.lock")
+    run_git(cfg.clone, "commit", "--quiet", "-m", "lock")
+    run_git(cfg.clone, "push", "--quiet", str(github), "HEAD:main")
+    dispatch.fetch_main(cfg.clone, "owner/repo", "t")
+    (worktree / ".venv").mkdir()
+    with pytest.raises(dispatch.Blocked, match="the checkout contains .venv"):
+        dispatch.recheck(worktree, gitfile, {})
+
+
+def test_a_follow_up_that_returns_no_pr_body_still_adds_its_cost_and_turns(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    claude(
+        {"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]},
+        {"output": [result(structured_output={"pr_title": "Add a file"})]},
+    )
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line.startswith("#7: blocked (the work is on https://github.com/owner/repo/tree/agent/")
+    assert "run cost=1.27 turns=9 secs=184 -->" in api.posted("/issues/7/comments")[0]["body"]
+
+
+def test_a_follow_up_for_an_over_long_description_is_told_to_shorten_the_code_blocks(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    long = SECTIONS + "\n```\n" + "x" * pr_format.MAX_CHARS + "\n```\n"
+    calls = claude(
+        {"files": {"a.txt": "x\n"}, "output": [result(body=long)]}, {"output": [result()]}
+    )
+    assert dispatch.work(FakeApp(ready_api()), cfg, issue(7)) == "#7: opened https://example/pull/1"
+    said = json.loads(calls.read_text())[1][1].split("<description>")[0]
+    assert "characters; the limit is 65536" in said and "shorten the code blocks" in said
+    assert "words" not in said
+
+
 @pytest.mark.parametrize(
     ("step", "reason"),
     [
+        (
+            {"output": [result(is_error=True, result="limit " + "x" * 400)]},
+            "session ended with success: limit " + "x" * 294 + ")",
+        ),
         ({"output": [result()]}, "the agent made no changes:"),
         ({"output": [result(subtype="error_max_turns")]}, "session ended with error_max_turns"),
         ({"output": [result(structured_output=None)]}, "session returned no pull request text"),
@@ -632,10 +717,15 @@ def test_a_dry_run_lists_tasks_without_taking_them(monkeypatch: pytest.MonkeyPat
 class OneRepoApp(FakeApp):
     """An App installed on owner/repo and other/repo only."""
 
+    def __init__(self, api: FakeApi, other: FakeApi | None = None) -> None:
+        super().__init__(api)
+        self.other = other or api
+
     def token(self, repo: str, **permissions: str) -> FakeApi:
         if repo not in ("owner/repo", "other/repo"):
             raise urllib.error.HTTPError("u", 404, "Not Found", Message(), io.BytesIO())
-        return super().token(repo, **permissions)
+        super().token(repo, **permissions)
+        return self.other if repo == "other/repo" else self.api
 
 
 def dependency(state: str, reason: str | None = None, *labels: str) -> dict[str, Any]:
@@ -646,9 +736,41 @@ def missing(_path: str) -> Any:
     raise urllib.error.HTTPError("u", 404, "Not Found", Message(), io.BytesIO())
 
 
+def gone(_path: str) -> Any:
+    raise urllib.error.HTTPError("u", 410, "Gone", Message(), io.BytesIO())
+
+
+def timeout(_path: str) -> Any:
+    raise TimeoutError("timed out")
+
+
+@pytest.mark.parametrize(("found", "why"), [(gone, "HTTP 410"), (timeout, "TimeoutError")])
+def test_a_dependency_lookup_that_fails_holds_only_that_task(
+    found: Any, why: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks = [issue(14, body="### Depends on\n\n#12\n"), issue(15)]
+    monkeypatch.setattr(dispatch, "select", lambda api, cfg, waits: tasks)
+    monkeypatch.setattr(dispatch, "work", lambda app, cfg, task: f"#{task['number']}: opened")
+    lines = list[str]()
+    dispatch.dispatch(FakeApp(FakeApi({"/issues/12": found})), CFG, out=lines.append)
+    assert lines == ["#15: taking 't15'", f"#14: waiting on #12 ({why})", "#15: opened"]
+
+
+def test_a_dependency_that_is_a_merged_pull_request_counts_as_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = issue(14, body="### Depends on\n\n#12\n")
+    monkeypatch.setattr(dispatch, "select", lambda api, cfg, waits: [task])
+    merged = dependency("closed") | {"pull_request": {"merged_at": "2026-01-01T00:00:00Z"}}
+    lines = list[str]()
+    dispatch.dispatch(FakeApp(FakeApi({"/issues/12": merged})), CFG, True, lines.append)
+    assert lines == ["#14: would take 't14'"]
+
+
 @pytest.mark.parametrize(
     ("found", "why"),
     [
+        (dependency("closed") | {"pull_request": {"merged_at": None}}, "closed"),
         (dependency("open"), "open"),
         (dependency("open", "reopened", "status:blocked"), "blocked"),
         (dependency("closed", "not_planned"), "not planned"),
@@ -672,13 +794,15 @@ def test_a_dependency_in_another_repo_is_read_with_an_issues_read_token(
 ) -> None:
     task = issue(14, body="### Depends on\n\n#12, other/repo#9 and far/away#2\n")
     monkeypatch.setattr(dispatch, "select", lambda api, cfg, waits: [task])
-    routes = {"/issues/12": dependency("open", None, "status:blocked"), "/issues/9": missing}
-    app, lines = OneRepoApp(FakeApi(routes)), list[str]()
+    done = dependency("closed", "completed")
+    api = FakeApi({"/issues/12": dependency("open", None, "status:blocked"), "/issues/9": done})
+    other = FakeApi({"/issues/9": dependency("open")})
+    app, lines = OneRepoApp(api, other), list[str]()
     dispatch.dispatch(app, CFG, dry_run=True, out=lines.append)
-    assert lines == [
-        "#14: waiting on #12 (blocked), other/repo#9 (not found), far/away#2 (not found)"
-    ]
+    assert lines == ["#14: waiting on #12 (blocked), other/repo#9 (open), far/away#2 (not found)"]
     assert app.asked[1:] == [("other/repo", {"issues": "read"})]
+    assert other.calls == [("GET", "/issues/9", None)]
+    assert ("GET", "/issues/9", None) not in api.calls
 
 
 def test_a_task_is_taken_once_every_dependency_is_closed_as_completed(

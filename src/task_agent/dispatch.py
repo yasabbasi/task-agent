@@ -62,8 +62,7 @@ REPAIR = """The pull request description below fails these checks:
 
 {problems}
 
-It has {words} words, not counting code blocks; aim for 200. Change no files. Return the same
-pr_title, and the whole corrected description as pr_body.
+{size} Change no files. Return the same pr_title, and the whole corrected description as pr_body.
 
 <description>
 {body}
@@ -230,15 +229,17 @@ def blockers(app: App, api: Api, issue: Json) -> list[str]:
         try:
             other = api if repo == api.repo else app.token(repo, issues="read")
             dep: Json = other("GET", f"/issues/{number}")
-        except urllib.error.HTTPError as exc:
-            if exc.code not in (403, 404):
-                raise
-            dep = {}
+        except Exception as exc:  # one failed lookup holds only this task
+            code = getattr(exc, "code", None)
+            held_by = f"HTTP {code}" if code else type(exc).__name__
+            dep = {} if code in (403, 404) else {"state": held_by}
         if dep.get("state") == "open":
             stuck = any(lb["name"] == "status:blocked" for lb in dep["labels"])
             why = "blocked" if stuck else "open"
         else:
-            why = (dep.get("state_reason") or dep.get("state", "not found")).replace("_", " ")
+            merged = (dep.get("pull_request") or {}).get("merged_at") and "completed"
+            why = merged or dep.get("state_reason") or dep.get("state", "not found")
+            why = why.replace("_", " ")
         if why != "completed":
             held.append(f"{'' if repo == api.repo else repo}#{number} ({why})")
     return held
@@ -310,7 +311,7 @@ def checkout(cfg: Config, worktree: Path, gitfile: str, api: Api, pull: Json) ->
     except subprocess.CalledProcessError:
         if not git(worktree, "ls-files", "--unmerged"):
             raise
-    recheck(cfg, worktree, gitfile, {})
+    recheck(worktree, gitfile, {}, "origin/main")
     if changed := git(worktree, "diff", "--name-only", "origin/main", "--", *PINNED).split():
         raise Blocked(f"refused a rework: the branch changes {', '.join(changed)}")
     text = "\n\n".join(feedback(api, cfg, pull)).replace("</review>", "&lt;/review>")
@@ -405,7 +406,8 @@ def run_agent(
     init = next((m for m in found if m.get("subtype") == "init"), {})
     result |= {"init": init, "transcript": stdout}
     if result.get("is_error") or result.get("subtype") != "success":
-        raise Blocked(f"session ended with {result.get('subtype')}", result)
+        said = f"{result.get('subtype')}: {str(result.get('result') or '')[:300]}"
+        raise Blocked(f"session ended with {said.removesuffix(': ')}", result)
     if not isinstance(result.get("structured_output"), dict):
         raise Blocked("session returned no pull request text", result)
     return result
@@ -464,11 +466,11 @@ def commit(cfg: Config, worktree: Path, api: Api, title: str, result: Json) -> l
     return [name for name in names.split("\0") if name]
 
 
-def recheck(cfg: Config, worktree: Path, gitfile: str, result: Json) -> None:
+def recheck(worktree: Path, gitfile: str, result: Json, rev: str = "HEAD") -> None:
     """Before a follow-up session: block if the .git file changed or a refused file appeared."""
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)
-    made = ".venv" if git(cfg.clone, "ls-tree", "origin/main", "uv.lock") else ""
+    made = ".venv" if git(worktree, "ls-tree", rev, "uv.lock") else ""
     for name in REFUSE:
         if name != made and (worktree / name).exists():
             raise Blocked(f"refused a follow-up: the checkout contains {name}", result)
@@ -476,12 +478,15 @@ def recheck(cfg: Config, worktree: Path, gitfile: str, result: Json) -> None:
 
 def repair(cfg: Config, worktree: Path, number: int, text: str, problems: str, result: Json) -> str:
     """A short follow-up session rewrites a failing description; its cost is added to result."""
-    words = pr_format.word_count(pr_body(text, number, result))
-    values, began = {"problems": problems, "words": str(words), "body": text}, time.monotonic()
+    body = pr_body(text, number, result)
+    size = f"It has {pr_format.word_count(body)} words, not counting code blocks; aim for 200."
+    if len(body) > pr_format.MAX_CHARS:
+        size = "It is too long: shorten the code blocks."
+    values, began = {"problems": problems, "size": size, "body": text}, time.monotonic()
     try:
         short = replace(cfg, max_turns=5, budget_usd=0.5, timeout_min=5)
         more = run_agent(short, worktree, number, render(REPAIR, values))
-        text = more["structured_output"]["pr_body"]
+        text = more["structured_output"].get("pr_body") or text
     except Exception as exc:  # any failure repaired nothing; the work is still pushed
         if CANCEL.wait(1 if isinstance(exc, subprocess.SubprocessError) else 0):
             raise
@@ -514,7 +519,7 @@ def publish(
         problems = "\n".join(f"- {p}" for p in found)
         if not (left and found and all(p.startswith("the description") for p in found)):
             break
-        recheck(cfg, worktree, gitfile, result)
+        recheck(worktree, gitfile, result)
         text = repair(cfg, worktree, number, text, problems, result)
     if any(pr_format.protected(path) for path in files):
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)
