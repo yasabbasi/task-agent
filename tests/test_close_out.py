@@ -16,24 +16,30 @@ Calls = list[tuple[tuple[str, ...], str | None]]
 
 
 class FakeGh:
-    """Records every gh call; answers the title listing and the state and label lookup."""
+    """Records every gh call, remembers the issues it created and lists them with `bodies`."""
 
     def __init__(
         self,
-        titles: tuple[str, ...] = (),
+        bodies: tuple[str, ...] = (),
         labels: tuple[str, ...] = (),
         state: str = "CLOSED",
         fails: tuple[str, ...] = (),
     ) -> None:
         self.calls: Calls = []
-        self.titles, self.labels, self.state, self.fails = titles, labels, state, fails
+        self.issues = [{"title": "open", "body": body} for body in bodies]
+        self.labels, self.state, self.fails = labels, state, fails
 
     def __call__(self, *args: str, input: str | None = None) -> str:
         self.calls.append((args, input))
-        if args[1] in self.fails:
-            raise subprocess.CalledProcessError(1, ["gh", *args], stderr=f"no {args[1]} today\n")
-        answers = {"list": self.titles, "view": (self.state, *self.labels)}
-        return "".join(f"{line}\n" for line in answers.get(args[1], ()))
+        if (command := " ".join(args[:2])) in self.fails:
+            raise subprocess.CalledProcessError(1, ["gh", *args], stderr=f"no {command} today\n")
+        if command == "issue create":
+            self.issues.append({"title": args[5], "body": input or ""})
+        if command == "issue list":
+            return json.dumps(self.issues)
+        return "".join(
+            f"{line}\n" for line in (self.state, *self.labels) if command == "issue view"
+        )
 
     def made(self, *start: str) -> Calls:
         return [(args, input) for args, input in self.calls if args[: len(start)] == start]
@@ -103,22 +109,34 @@ def test_an_issue_that_is_not_closed_keeps_its_labels(
 def test_at_most_five_new_rules_are_filed_and_the_rest_counted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    gh = fake(monkeypatch, titles=("r0", "r1"))
+    gh = fake(monkeypatch, bodies=("r0", f"r1\n\n{URL}"))
     body = SECTIONS.replace("None\n", "".join(f"rule: r{n}\n" for n in range(9)))
     close_out.run_event(write_event(tmp_path, body), BOT)
     assert titles_filed(gh) == ["r2", "r3", "r4", "r5", "r6"]
     assert capsys.readouterr().out == "left out 2 lessons; at most 5 are filed\n"
 
 
-def test_rules_are_compared_by_full_text_with_titles_split_on_newlines_only(
+def test_rules_are_compared_with_the_first_paragraph_of_each_open_issue_body(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    gh = fake(monkeypatch, titles=("a\x0cb", LONG[:72].strip()))
+    gh = fake(monkeypatch, bodies=(f"a\x0cb\r\n\r\n{URL}", f"{LONG}x\n\n{URL}", f"see\n\n{LONG}y"))
     body = SECTIONS.replace("None\n", f"rule: a\x0cb\nrule: a\nrule: {LONG}x\nrule: {LONG}y\n")
     close_out.run_event(write_event(tmp_path, body), BOT)
     assert [text for _, text in gh.made("issue", "create")] == [
-        f"{rule}\n\n{URL}" for rule in ("a", f"{LONG}x", f"{LONG}y")
+        f"{rule}\n\n{URL}" for rule in ("a", f"{LONG}y")
     ]
+
+
+def test_closing_out_the_same_merge_twice_files_each_rule_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch)
+    rules = ["use `uv run`", f"{LONG}x", f"{LONG}y"]
+    body = SECTIONS.replace("None\n", "".join(f"rule: {rule}\n" for rule in rules))
+    for _ in range(2):
+        assert close_out.run_event(write_event(tmp_path, body), BOT) == 0
+    assert [text for _, text in gh.made("issue", "create")] == [f"{r}\n\n{URL}" for r in rules]
+    assert titles_filed(gh)[1] == titles_filed(gh)[2] == LONG[:72].strip()
 
 
 def test_status_and_the_author_label_are_handled_before_lessons(
@@ -136,7 +154,9 @@ def test_status_and_the_author_label_are_handled_before_lessons(
     ]
 
 
-@pytest.mark.parametrize("failing", ["view", "edit", "list", "create"])
+@pytest.mark.parametrize(
+    "failing", ["issue view", "issue edit", "pr edit", "issue list", "issue create"]
+)
 def test_a_failed_gh_call_is_printed_and_the_rest_still_runs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -146,9 +166,9 @@ def test_a_failed_gh_call_is_printed_and_the_rest_still_runs(
     gh = fake(monkeypatch, labels=("status:review",), fails=(failing,))
     event = write_event(tmp_path, "Closes #7\nCloses #9\n\n" + BODY, by="yas")
     assert cli.main(["close-out", "--event", event, "--bot", BOT]) == 1
-    assert f"no {failing} today" in capsys.readouterr().out
+    assert f"gh {failing} failed: no {failing} today" in capsys.readouterr().out
     assert len(gh.made("issue", "view")) == 2 and gh.made("pr", "edit") and gh.made("issue", "list")
-    assert failing == "list" or len(gh.made("issue", "create")) == 2
+    assert failing == "issue list" or len(gh.made("issue", "create")) == 2
 
 
 def test_each_rule_becomes_a_triage_lesson_issue(
@@ -168,10 +188,10 @@ def test_each_rule_becomes_a_triage_lesson_issue(
     assert long_body == f"{LONG.strip()}\n\n{URL}"
 
 
-def test_a_rule_whose_title_matches_an_open_issue_is_skipped(
+def test_a_rule_that_starts_an_open_issue_body_is_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    gh = fake(monkeypatch, titles=("use `uv run`", "something else"))
+    gh = fake(monkeypatch, bodies=(f"use `uv run`\n\n{URL}", "something else"))
     close_out.run_event(write_event(tmp_path), BOT)
     assert [args[5] for args, _ in gh.made("issue", "create")] == [LONG[:72].strip()]
 
@@ -244,7 +264,7 @@ def test_gh_is_called_without_a_shell(monkeypatch: pytest.MonkeyPatch, tmp_path:
     ran: list[tuple[list[str], dict[str, object]]] = []
 
     class Done:
-        stdout = ""
+        stdout = "[]"
 
     def run(argv: list[str], **kwargs: object) -> Done:
         ran.append((argv, kwargs))
