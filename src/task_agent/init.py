@@ -1,6 +1,7 @@
 """Set up another repo for the loop, as whoever is signed in to gh; safe to run again."""
 
 import json
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -18,6 +19,7 @@ COPIED = (
     ".github/ISSUE_TEMPLATE/config.yml",
 )
 WORKFLOWS = ("gate.yml", "readiness.yml", "close-out.yml")
+VERSION = re.compile(r"v\d+\.\d+\.\d+")
 FREE = "warning: {} is private and its owner is on the free plan, so rulesets are not enforced"
 
 
@@ -27,9 +29,18 @@ def git(cwd: Path, *args: str, check: bool = True) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
-def show(clone: Path, path: str, check: bool = True) -> str:
-    """A file as it is on origin/main; "" when it is missing and check is off."""
-    return git(clone, "show", f"origin/main:{path}", check=check)
+def show(clone: Path, path: str, ref: str = "origin/main", check: bool = True) -> str:
+    """A file as it is at ref; "" when it is missing and check is off."""
+    return git(clone, "show", f"{ref}:{path}", check=check)
+
+
+def pin(root: Path) -> tuple[str, str]:
+    """Fetch origin with its tags; the commit every source is read from, and its name."""
+    git(root, "fetch", "--quiet", "--tags", "origin")
+    tags = git(root, "tag", "--merged", "origin/main", "--sort=-v:refname", "--list", "v*")
+    found = [tag for tag in tags.split() if VERSION.fullmatch(tag)]
+    sha = git(root, "rev-parse", f"{found[0] if found else 'origin/main'}^{{commit}}").strip()
+    return sha, found[0] if found else sha[:7]
 
 
 def settings(repo: str, labels: str) -> None:
@@ -47,18 +58,16 @@ def settings(repo: str, labels: str) -> None:
     gh("api", "-X", "PUT", path, "-f", "default_workflow_permissions=read", *reviews)
 
 
-def managed(base: Config, target: Config) -> dict[str, str]:
+def managed(base: Config, target: Config, sha: str, tag: str) -> dict[str, str]:
     """Each managed path with the text it should have on the target's main."""
-    files = {path: show(base.root, path) for path in COPIED}
+    files = {path: show(base.root, path, sha) for path in COPIED}
     top = git(target.clone, "ls-tree", "--name-only", "origin/main").splitlines()
     if not any(name.upper().startswith("LICEN") for name in top):
-        files["LICENSE"] = show(base.root, "LICENSE")
-    sha = git(base.root, "rev-parse", "origin/main").strip()
-    tags = git(base.root, "tag", "--points-at", sha).split()
+        files["LICENSE"] = show(base.root, "LICENSE", sha)
     values = {"TASK_AGENT_REPO": base.repo, "TASK_AGENT_BOT": base.bot}
-    values |= {"TASK_AGENT_SHA": sha, "TASK_AGENT_TAG": tags[0] if tags else sha[:7]}
+    values |= {"TASK_AGENT_SHA": sha, "TASK_AGENT_TAG": tag}
     for name in WORKFLOWS:
-        text = show(base.root, f".github/templates/{name}")
+        text = show(base.root, f".github/templates/{name}", sha)
         for key, value in values.items():
             text = text.replace(key, value)
         files[f".github/workflows/{name}"] = text
@@ -71,6 +80,7 @@ def managed(base: Config, target: Config) -> dict[str, str]:
 
 def propose(target: Config, changed: dict[str, str]) -> str:
     """Commit the files on a branch in a temporary worktree, push it, and return the PR's link."""
+    git(target.clone, "worktree", "prune")
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp) / "init"
         git(target.clone, "worktree", "add", "--quiet", "-B", BRANCH, str(tree), "origin/main")
@@ -81,13 +91,16 @@ def propose(target: Config, changed: dict[str, str]) -> str:
             git(tree, "add", "--", *changed)
             git(tree, "commit", "--quiet", "-m", TITLE)
             git(tree, "push", "--quiet", "--force", "origin", BRANCH)
+            head = git(tree, "rev-parse", "HEAD").strip()
         finally:
             git(target.clone, "worktree", "remove", "--force", str(tree))
     aimed = ["--repo", target.repo, "--head", BRANCH]
-    if url := gh("pr", "list", *aimed, "--json", "url", "--jq", ".[].url").strip():
-        return url
     body = "Files brought up to date by `task-agent init`:\n\n"
     body += "".join(f"- `{path}`\n" for path in changed)
+    for pr in json.loads(gh("pr", "list", *aimed, "--json", "url,isCrossRepository,headRefOid")):
+        if not pr["isCrossRepository"] and pr["headRefOid"] == head:
+            gh("pr", "edit", pr["url"], "--body", body)
+            return str(pr["url"])
     labeled = [*aimed, "--label", "human-authored"]
     return gh("pr", "create", *labeled, "--title", TITLE, "--body", body).strip()
 
@@ -100,15 +113,32 @@ def ruleset(repo: str, text: str) -> None:
     gh("api", "-X", method, path, "--input", "-", input=text)
 
 
-def run(base: Config, target: Config) -> None:
-    """Settings first, then a pull request for files that differ, else the ruleset."""
+def steps(base: Config, target: Config) -> None:
     repo = target.repo
-    settings(repo, show(base.root, ".github/labels.json"))
+    url = git(target.clone, "config", "--get", "remote.origin.url", check=False).strip().lower()
+    if repo.lower() == base.repo.lower():
+        raise SystemExit(f"{repo} is task-agent itself; its workflows are written by hand")
+    if not url.removesuffix(".git").endswith((f"/{repo.lower()}", f":{repo.lower()}")):
+        raise SystemExit(f"origin of {target.clone} is not {repo}")
+    sha, tag = pin(base.root)
     git(target.clone, "fetch", "--quiet", "origin", "main")
-    files = managed(base, target)
+    files = managed(base, target, sha, tag)
+    above = {str(up) for path in files for up in (Path(path), *Path(path).parents)} - {"."}
+    listed = git(target.clone, "ls-tree", "origin/main", "--", *above).splitlines()
+    if any(line.startswith("120000") for line in listed):
+        raise SystemExit(f"{repo}: a managed path or a folder above it is a symlink on main")
+    settings(repo, show(base.root, ".github/labels.json", sha))
     changed = {p: text for p, text in files.items() if show(target.clone, p, check=False) != text}
     if changed:
         print(f"{repo}: merge {propose(target, changed)} and run init again for the ruleset")
         return
-    ruleset(repo, show(base.root, ".github/ruleset.json"))
+    ruleset(repo, show(base.root, ".github/ruleset.json", sha))
     print(f"{repo} is up to date")
+
+
+def run(base: Config, target: Config) -> None:
+    """Settings first, then a pull request for files that differ, else the ruleset."""
+    try:
+        steps(base, target)
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"{' '.join(error.cmd[:2])}: {error.stderr.strip()}") from None
