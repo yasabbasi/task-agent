@@ -14,6 +14,7 @@ import urllib.error
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,16 @@ APPROVAL = """query($owner: String!, $name: String!, $number: Int!) {
     } }
   } }
 }"""
+REPAIR = """The pull request description below fails these checks:
+
+{problems}
+
+It has {words} words, not counting code blocks; aim for 200. Change no files. Return the same
+pr_title, and the whole corrected description as pr_body.
+
+<description>
+{body}
+</description>"""
 
 
 class Blocked(Exception):
@@ -274,7 +285,8 @@ def run_agent(
     stdout, stderr, code = session(cmd, cfg, worktree)
     logs = cfg.root / ".worktrees" / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    (logs / f"{cfg.name}-issue-{number}-{int(time.time())}.json").write_text(stdout or stderr)
+    name = f"{cfg.name}-issue-{number}-{int(time.time())}-{uuid.uuid4().hex[:8]}.json"
+    (logs / name).write_text(stdout or stderr)
     found: list[Json] = []
     for text in [stdout, *stdout.splitlines()]:  # one result, a list, or one message per line
         with contextlib.suppress(json.JSONDecodeError):
@@ -334,17 +346,42 @@ def commit(cfg: Config, worktree: Path, api: Api, title: str, result: Json) -> l
     return [name for name in names.split("\0") if name]
 
 
+def repair(cfg: Config, worktree: Path, number: int, text: str, problems: str, result: Json) -> str:
+    """A short follow-up session rewrites a failing description; its cost is added to result."""
+    words = pr_format.word_count(pr_body(text, number, result))
+    values = {"problems": problems, "words": str(words), "body": text}
+    try:
+        short = replace(cfg, max_turns=5, budget_usd=0.5, timeout_min=5)
+        more = run_agent(short, worktree, number, render(REPAIR, values))
+        text = more["structured_output"]["pr_body"]
+    except Blocked as exc:
+        if CANCEL.is_set():
+            raise
+        more = exc.result
+    for key in ("total_cost_usd", "num_turns", "duration_ms"):
+        result[key] = (result.get(key) or 0) + (more.get(key) or 0)
+    return text
+
+
 def publish(app: App, cfg: Config, worktree: Path, gitfile: str, number: int, result: Json) -> str:
     """Commit, check, push and open the pull request; return what to print."""
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)
     api = app.token(cfg.repo, contents="write", pull_requests="write", issues="write")
     branch, out = f"agent/issue-{number}", result["structured_output"]
-    title, body = one_line(out["pr_title"]), pr_body(out["pr_body"], number, result)
+    title, text = one_line(out["pr_title"]), out["pr_body"]
     files = commit(cfg, worktree, api, title, result)
-    problems = "\n".join(f"- {p}" for p in pr_format.check(title, body, branch, files))
+    for left in (2, 1, 0):
+        body = pr_body(text, number, result)
+        found = pr_format.check(title, body, branch, files)
+        problems = "\n".join(f"- {p}" for p in found)
+        if not (left and found and all(p.startswith("the description") for p in found)):
+            break
+        text = repair(cfg, worktree, number, text, problems, result)
     if any(pr_format.protected(path) for path in files):
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)
+    if (worktree / ".git").read_text() != gitfile:
+        raise Blocked("the worktree's .git file was changed", result)
     push(worktree, api.token, cfg.repo, branch)
     if problems:
         link = f"https://github.com/{cfg.repo}/tree/{branch}"

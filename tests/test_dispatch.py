@@ -15,9 +15,10 @@ from typing import Any
 import pytest
 from conftest import BOT, CFG, SECTIONS, FakeApi, FakeApp, approval, result, run_git
 
-from task_agent import config, dispatch
+from task_agent import config, dispatch, pr_format
 
 Plan = Callable[..., Path]
+BAD = SECTIONS + "Also fixes #99."
 
 
 def claim_comment(cid: int, run: str, login: str = BOT, minutes: int = 30) -> dict[str, Any]:
@@ -229,6 +230,7 @@ def test_a_task_goes_from_claim_to_pull_request(
     assert log == f"{BOT} <42+{BOT}@users.noreply.github.com> Add a file"
     assert run_git(github, "show", "agent/issue-7:src/new.py") == "x = 1\n"
     assert not (cfg.clone / ".worktrees" / "issue-7").exists()
+    assert len(json.loads(calls.read_text())) == 1
     argv = json.loads(calls.read_text())[0]
     for flag in ("--restricted", "--strict-mcp-config", "--disable-slash-commands"):
         assert flag in argv
@@ -259,13 +261,103 @@ def test_a_description_that_closes_another_issue_is_blocked_with_a_link_to_the_b
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
-    claude({"files": {"a.txt": "x\n"}, "output": [result(body=SECTIONS + "Also fixes #99.")]})
+    calls = claude({"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]})
     api = ready_api()
     line = dispatch.work(FakeApp(api), cfg, issue(7))
     assert line.startswith("#7: blocked (the work is on https://github.com/owner/repo/tree/agent/")
-    assert "#99" in api.posted("/issues/7/comments")[0]["body"]
+    comment = api.posted("/issues/7/comments")[0]["body"]
+    assert "#99" in comment and "run cost=1.27 turns=9 secs=184 -->" in comment
     assert "agent/issue-7" in run_git(github, "branch", "--list")
     assert not api.posted("/pulls")
+    assert len(json.loads(calls.read_text())) == 3
+
+
+def test_a_failing_description_is_rewritten_by_short_follow_up_sessions(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    monkeypatch.setattr("time.time", lambda: 1.0)
+    minutes, real = list[int](), dispatch.session
+
+    def timed(cmd: list[str], cfg: config.Config, worktree: Path) -> tuple[str, str, int]:
+        minutes.append(cfg.timeout_min)
+        return real(cmd, cfg, worktree)
+
+    monkeypatch.setattr(dispatch, "session", timed)
+    fixed = SECTIONS.replace("Because.", "Repaired.")
+    calls = claude(
+        {"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]},
+        {"files": {"late.txt": "x\n"}, "output": [result(body=BAD + " Still.")]},
+        {"output": [result(body=fixed)]},
+    )
+    api = ready_api()
+    assert dispatch.work(FakeApp(api), cfg, issue(7)) == "#7: opened https://example/pull/1"
+    body = api.posted("/pulls")[0]["body"]
+    assert "Repaired." in body and "#99" not in body
+    assert body.endswith("<!-- task-agent:run cost=1.27 turns=9 secs=184 -->\n")
+    assert run_git(github, "ls-tree", "--name-only", "agent/issue-7").count("txt") == 1
+    first, second, third = json.loads(calls.read_text())
+    assert minutes == [50, 5, 5] and "Still." in third[1] and "Still." not in second[1]
+    words = pr_format.word_count("Closes #7\n\n" + BAD)
+    for argv, count in ((second, words), (third, words + 1)):
+        assert argv[argv.index("--max-turns") + 1] == "5"
+        assert argv[argv.index("--max-budget-usd") + 1] == "0.5"
+        assert "- the description may close only its own issue, not #99" in argv[1]
+        assert f"It has {count} words" in argv[1] and "aim for 200" in argv[1]
+        assert "Change no files" in argv[1]
+    assert len(list((cfg.root / ".worktrees" / "logs").glob("repo-issue-7-1-*.json"))) == 3
+
+
+def test_a_follow_up_that_rewrites_the_git_file_gets_nothing_pushed(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    claude(
+        {"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]},
+        {"files": {".git": "gitdir: /elsewhere\n"}, "output": [result()]},
+    )
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line == "#7: blocked (the worktree's .git file was changed)"
+    assert "run cost=0.85 turns=6 secs=123 -->" in api.posted("/issues/7/comments")[0]["body"]
+    assert "agent/issue-7" not in run_git(github, "branch", "--list")
+    assert not api.posted("/pulls")
+
+
+@pytest.mark.parametrize(("name", "title"), [("CLAUDE.md", "Add a file"), ("a.txt", "Fix #3 now")])
+def test_a_protected_path_or_a_failing_title_starts_no_follow_up(
+    cfg: config.Config, claude: Plan, monkeypatch: pytest.MonkeyPatch, name: str, title: str
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    text = {"pr_title": title, "pr_body": BAD}
+    calls = claude({"files": {name: "x\n"}, "output": [result(structured_output=text)]})
+    api = ready_api()
+    assert dispatch.work(FakeApp(api), cfg, issue(7)).startswith("#7: blocked")
+    assert "#99" in api.posted("/issues/7/comments")[0]["body"]
+    assert len(json.loads(calls.read_text())) == 1
+
+
+def test_a_cancel_during_a_follow_up_puts_the_task_back_with_nothing_pushed(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    monkeypatch.setattr(dispatch, "CANCEL", threading.Event())
+    seen, real = list[str](), dispatch.session
+
+    def interrupted(cmd: list[str], cfg: config.Config, worktree: Path) -> tuple[str, str, int]:
+        seen.append(cmd[2])
+        if len(seen) == 2:
+            dispatch.cancel()
+        return real(cmd, cfg, worktree)
+
+    monkeypatch.setattr(dispatch, "session", interrupted)
+    claude({"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]})
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line == "#7: cancelled, back to status:ready" and len(seen) == 2
+    assert api.posted("/issues/7/labels") == [{"labels": ["status:ready"]}]
+    assert "agent/issue-7" not in run_git(github, "branch", "--list")
+    assert not api.posted("/issues/7/comments")
 
 
 @pytest.mark.parametrize(
