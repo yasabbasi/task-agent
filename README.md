@@ -75,7 +75,7 @@ session, acting as the owner. The owner reviews and approves every pull request.
 make check
 ```
 
-`make help` lists every target. `make format` fixes style. `src/` is capped at 1,500 lines,
+`make help` lists every target. `make format` fixes style. `src/` is capped at 1,800 lines,
 which `make loc` counts.
 
 ## License
