@@ -90,6 +90,7 @@ def test_gate_checks_the_pull_request_before_it_runs_the_change() -> None:
     order = ["default_branch", "task-agent pr-check", "check out the change", "make check"]
     assert sorted(order, key=gate.index) == order
     assert "${{" not in "".join(line for line in gate.splitlines() if "run:" in line)
+    assert "enable-cache: false" in gate
 
 
 def test_workflows_pin_actions_by_commit() -> None:
