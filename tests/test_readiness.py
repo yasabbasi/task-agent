@@ -179,6 +179,17 @@ def test_opened_issue_gets_its_labels_and_an_updated_comment(tmp_path: Path, cal
     assert patch[3] == "repos/o/r/issues/comments/555"
 
 
+def test_a_metrics_issue_gets_no_comment_and_no_triage_label(tmp_path: Path, calls: Calls) -> None:
+    readiness.run_event(write_event(tmp_path, "opened", ["metrics"]), "o/r", tmp_path)
+    assert not [args for args, _ in calls if "comment" in " ".join(args)]
+    assert not [args for args, _ in calls if "status:triage" in " ".join(args)]
+
+
+def test_a_lesson_issue_gets_no_comment(tmp_path: Path, calls: Calls) -> None:
+    readiness.run_event(write_event(tmp_path, "opened", ["lesson"]), "o/r", tmp_path)
+    assert not [args for args, _ in calls if "comment" in " ".join(args)]
+
+
 def test_an_edit_after_ready_sends_the_issue_back_to_triage(tmp_path: Path, calls: Calls) -> None:
     labels = ["status:ready", "type:feature", "priority:p2", "effort:s"]
     readiness.run_event(write_event(tmp_path, "edited", labels), "o/r", tmp_path)

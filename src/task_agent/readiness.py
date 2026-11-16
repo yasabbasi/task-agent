@@ -111,6 +111,8 @@ def run_event(event_path: str, repo: str, root: Path) -> None:
     """Handle an issue opened or edited event inside GitHub Actions."""
     issue = (event := json.loads(Path(event_path).read_text()))["issue"]
     have = {label["name"] for label in issue["labels"]}
+    if "metrics" in have:
+        return
     fields = parse_body(issue["body"])
     add, remove, note = labels_for(fields) - have, set[str](), ""
     if event["action"] == "opened" and not any(name.startswith("status:") for name in have):
@@ -124,4 +126,5 @@ def run_event(event_path: str, repo: str, root: Path) -> None:
     edit += ["--remove-label", ",".join(sorted(remove))] if remove else []
     if add or remove:
         gh(*edit)
-    upsert_comment(repo, issue["number"], comment(check(fields, path_checker(root)), note))
+    if "lesson" not in have:
+        upsert_comment(repo, issue["number"], comment(check(fields, path_checker(root)), note))

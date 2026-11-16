@@ -66,8 +66,12 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 def cmd_dispatch_all(args: argparse.Namespace) -> int:
     app, base, _ = loaded(args)
     targets = [base.target(repo) for repo in base.repos]
-    dispatch.run_pass(app, base, targets, each=lambda cfg, out: verify.requested(app, cfg, out))
-    requested(app, base, dispatch.say)
+
+    def each(cfg: config.Config, out: dispatch.Out) -> None:
+        verify.requested(app, cfg, out)
+        requested(app, base, dispatch.say)
+
+    dispatch.run_pass(app, base, targets, each=each)
     return 0
 
 

@@ -3,6 +3,7 @@
 import re
 from base64 import b64decode, b64encode
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 from statistics import median
 from typing import Any
@@ -99,25 +100,36 @@ def report(app: App, base: Config, out: Out = print) -> str:
     return "\n".join(f"| {line} |" for line in [HEAD, " | ".join(["---"] * 7), *lines])
 
 
-def publish(app: App, base: Config, out: Out = print) -> str:
+def publish(app: App, base: Config) -> str:
     """Open a pull request from the App that puts the table in the README; returns what it did."""
-    table = report(app, base, out)
-    api = app.token(base.repo, contents="write", pull_requests="write", issues="write")
-    sha = api("GET", "/git/ref/heads/main")["object"]["sha"]
-    readme = api("GET", f"/contents/README.md?ref={sha}")
-    head, _, rest = b64decode(readme["content"]).decode().partition(MARKS[0])
-    old, end, tail = rest.partition(MARKS[1])
-    if not end or old.strip() == table:
-        why = "already has this table" if end else "has no metrics markers"
-        return f"metrics: README.md on main {why}, so nothing was opened"
-    number = api("POST", "/issues", {"title": TITLE, "labels": ["metrics"]})["number"]
-    branch = f"agent/issue-{number}"
-    api("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
-    text = b64encode(f"{head}{MARKS[0]}\n{table}\n{end}{tail}".encode()).decode()
-    commit = {"message": TITLE, "content": text, "sha": readme["sha"], "branch": branch}
-    api("PUT", "/contents/README.md", commit)
-    pull = {"title": TITLE, "body": BODY.format(number), "head": branch, "base": "main"}
-    return f"metrics: opened {api('POST', '/pulls', pull)['html_url']}"
+    unread, number = list[str](), 0
+    try:
+        table = report(app, base, unread.append)
+        api = app.token(base.repo, contents="write", pull_requests="write", issues="write")
+        if unread or (left := api("GET", "/issues?state=open&labels=metrics")):
+            why = unread[0] if unread else f"metrics: #{left[0]['number']} is still open"
+            return f"{' '.join(why.split())}, so nothing was opened"
+        sha = api("GET", "/git/ref/heads/main")["object"]["sha"]
+        readme = api("GET", f"/contents/README.md?ref={sha}")
+        head, _, rest = b64decode(readme["content"]).decode().partition(MARKS[0])
+        old, end, tail = rest.partition(MARKS[1])
+        if not end or old.strip() == table:
+            why = "already has this table" if end else "has no metrics markers"
+            return f"metrics: README.md on main {why}, so nothing was opened"
+        number = api("POST", "/issues", {"title": TITLE, "labels": ["metrics"]})["number"]
+        branch = f"agent/issue-{number}"
+        api("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
+        text = b64encode(f"{head}{MARKS[0]}\n{table}\n{end}{tail}".encode()).decode()
+        commit = {"message": TITLE, "content": text, "sha": readme["sha"], "branch": branch}
+        api("PUT", "/contents/README.md", commit)
+        pull = {"title": TITLE, "body": BODY.format(number), "head": branch, "base": "main"}
+        return f"metrics: opened {api('POST', '/pulls', pull)['html_url']}"
+    except Exception as exc:  # the watcher's log gets one line, and nothing half-made is left
+        with suppress(Exception):
+            if number:
+                api("PATCH", f"/issues/{number}", {"state": "closed"})
+                api("DELETE", f"/git/refs/heads/agent/issue-{number}")
+        return f"metrics: could not publish: {exc!r}"
 
 
 def requested(app: App, base: Config, out: Out) -> None:
@@ -125,4 +137,4 @@ def requested(app: App, base: Config, out: Out) -> None:
     request = base.root / ".worktrees" / "requests" / "metrics"
     if request.exists():
         request.unlink()
-        out(publish(app, base, out))
+        out(publish(app, base))
