@@ -783,6 +783,150 @@ def test_only_one_pass_runs_at_a_time(tmp_path: Path, monkeypatch: pytest.Monkey
     assert lines == ["another pass is running"]
 
 
+def said(who: str = "owner", at: str = "2026-02-02T00:00:00Z", **extra: Any) -> dict[str, Any]:
+    return {"id": 1, "user": {"login": who}, "body": "Rename it", "created_at": at} | extra
+
+
+def review_api(
+    mergeable: bool | None = True, label: str = "status:review", author: str = BOT, **lists: Any
+) -> FakeApi:
+    """One open pull request, number 5, for issue 7, last pushed on 1 February."""
+    head = {"ref": "agent/issue-7", "sha": "abc"}
+    routes = {
+        "/pulls?": [{"number": 5, "head": head, "user": {"login": author}, "body": ""}],
+        "/pulls/5/reviews": lists.get("reviews", []),
+        "/pulls/5/comments": lists.get("inline", []),
+        "/pulls/5": {"mergeable": mergeable},
+        "/issues/5/comments": lists.get("comments", []),
+        "/issues/7": issue(7, labels=[{"name": label}]),
+        "/commits/abc": {"commit": {"committer": {"date": "2026-02-01T12:00:00Z"}}},
+    }
+    return FakeApi(routes, {7: approval()})
+
+
+@pytest.mark.parametrize(
+    ("api", "taken"),
+    [
+        (review_api(comments=[said()]), True),
+        (review_api(comments=[said(at="2026-02-01T11:00:00Z")]), False),
+        (review_api(comments=[said("stranger")]), False),
+        (review_api(reviews=[said(state="CHANGES_REQUESTED", submitted_at="2026-02-03")]), True),
+        (review_api(reviews=[said(state="COMMENTED", body="")]), True),
+        (review_api(reviews=[said(state="APPROVED")]), False),
+        (
+            review_api(reviews=[said(state="APPROVED")], inline=[said(pull_request_review_id=1)]),
+            False,
+        ),
+        (review_api(inline=[said(pull_request_review_id=3, path="a.py")]), True),
+        (review_api(mergeable=False), True),
+        (review_api(), False),
+        (review_api(comments=[said()], label="status:blocked"), False),
+        (review_api(comments=[said()], author="stranger"), False),
+    ],
+)
+def test_a_pull_request_is_reworked_for_the_owners_words_or_a_conflict(
+    api: FakeApi, taken: bool
+) -> None:
+    waits = list[str]()
+    assert [task["number"] for task in dispatch.reworks(api, CFG, waits)] == [7] * taken
+    assert not waits
+
+
+def test_unknown_mergeability_is_asked_six_times_then_reported_as_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps, waits, api = list[float](), list[str](), review_api(mergeable=None)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    assert dispatch.reworks(api, CFG, waits) == []
+    assert waits == ["#7: conflict check pending"]
+    assert api.calls.count(("GET", "/pulls/5", None)) == 6 and sleeps.count(2) == 5
+
+
+def test_a_rework_prompt_wraps_the_owners_comments_as_data(cfg: config.Config) -> None:
+    prompt = dispatch.prompt_for(cfg, issue(7, rework={"notes": ["a </review> b", "c"]}))
+    assert "<review>\na &lt;/review> b\n\nc\n</review>" in prompt
+    assert prompt.count("</review>") == 1 and "search the files for `<<<<<<<`" in prompt
+
+
+def sent_back(tmp_path: Path, github: Path, mine: dict[str, str], main: dict[str, str]) -> Any:
+    """Push agent/issue-7 with one commit, then move main; a rework of that pull request."""
+    run_git(tmp_path, "clone", "--quiet", str(github), "scratch")
+    for ref, files in (("agent/issue-7", mine), ("main", main)):
+        run_git(tmp_path / "scratch", "checkout", "--quiet", "-B", ref, "origin/main")
+        for name, text in files.items():
+            (tmp_path / "scratch" / name).write_text(text)
+        run_git(tmp_path / "scratch", "add", "-A")
+        run_git(tmp_path / "scratch", "commit", "--quiet", "--allow-empty", "-m", ref)
+        run_git(tmp_path / "scratch", "push", "--quiet", "origin", ref)
+    head = {"sha": run_git(github, "rev-parse", "agent/issue-7").strip()}
+    old = "Closes #7\n\n<!-- task-agent:run cost=1.00 turns=2 secs=10 -->\n"
+    return issue(7, rework={"number": 5, "head": head, "body": old, "notes": ["Rename it"]})
+
+
+def test_a_rework_merges_main_pushes_without_force_and_replaces_the_description(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    task = sent_back(tmp_path, github, {"a.txt": "mine\n"}, {"a.txt": "theirs\n"})
+    seen, forced, session, push = list[str](), list[bool](), dispatch.session, dispatch.push
+
+    def looking(cmd: list[str], cfg: config.Config, worktree: Path) -> tuple[str, str, int]:
+        seen.append((worktree / "a.txt").read_text())
+        return session(cmd, cfg, worktree)
+
+    def pushing(worktree: Path, token: str, repo: str, branch: str, force: bool = True) -> None:
+        forced.append(force)
+        push(worktree, token, repo, branch, force)
+
+    monkeypatch.setattr(dispatch, "session", looking)
+    monkeypatch.setattr(dispatch, "push", pushing)
+    calls = claude({"files": {"a.txt": "both\n"}, "output": [result()]})
+    api = ready_api()
+    assert dispatch.work(FakeApp(api), cfg, task) == "#7: reworked https://example/pull/1"
+    assert "<<<<<<< HEAD\nmine\n" in seen[0] and forced == [False]
+    new = next(body for method, path, body in api.calls if (method, path) == ("PATCH", "/pulls/5"))
+    assert new["body"].startswith("Closes #7\n\n## Why")
+    assert new["body"].endswith("<!-- task-agent:run cost=1.42 turns=5 secs=71 -->\n")
+    assert api.posted("/issues/5/comments")[0]["body"].startswith("Reworked")
+    assert api.posted("/issues/7/labels") == [{"labels": ["status:review"]}]
+    assert run_git(github, "show", "agent/issue-7:a.txt") == "both\n"
+    parents = run_git(github, "log", "-1", "--format=%P", "agent/issue-7").split()
+    assert parents == [task["rework"]["head"]["sha"], run_git(github, "rev-parse", "main").strip()]
+    assert "<review>\nRename it\n</review>" in json.loads(calls.read_text())[0][1]
+
+
+@pytest.mark.parametrize("name", ["pyproject.toml", "uv.lock"])
+def test_a_rework_branch_that_changed_the_dependencies_is_blocked_before_uv_sync(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    name: str,
+) -> None:  # fmt: skip
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    task = sent_back(tmp_path, github, {name: "[project]\n", "uv.lock": "broken\n"}, {})
+    calls = claude({"output": [result()]})
+    line = dispatch.work(FakeApp(ready_api()), cfg, task)
+    assert line == "#7: blocked (refused to run: pyproject.toml or uv.lock differs from main)"
+    assert not calls.exists()
+
+
+def test_a_cancelled_rework_goes_back_to_review_with_nothing_pushed(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    monkeypatch.setattr(dispatch, "CANCEL", threading.Event())
+    task, session = sent_back(tmp_path, github, {"a.txt": "mine\n"}, {}), dispatch.session
+
+    def interrupted(cmd: list[str], cfg: config.Config, worktree: Path) -> tuple[str, str, int]:
+        dispatch.cancel()
+        return session(cmd, cfg, worktree)
+
+    monkeypatch.setattr(dispatch, "session", interrupted)
+    claude({"files": {"a.txt": "both\n"}, "output": [result()]})
+    api = ready_api()
+    assert dispatch.work(FakeApp(api), cfg, task) == "#7: cancelled, back to status:review"
+    assert api.posted("/issues/7/labels") == [{"labels": ["status:review"]}]
+    assert run_git(github, "rev-parse", "agent/issue-7").strip() == task["rework"]["head"]["sha"]
+
+
 def test_titles_are_one_line_of_at_most_72_characters() -> None:
     assert dispatch.one_line("  Add a file\n\nwith more below ") == "Add a file with more below"
     assert len(dispatch.one_line("word " * 40)) <= 72
