@@ -22,7 +22,12 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      # No cache: one saved after a pull request's code ran could reach these checks next time.
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.8"
+          enable-cache: false
+          ignore-empty-workdir: true
       # The pull request's text reaches the script through the environment, never pasted in.
       - name: pull request checks
         if: github.event_name == 'pull_request'
