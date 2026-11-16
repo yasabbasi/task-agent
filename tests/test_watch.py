@@ -75,18 +75,39 @@ def test_restart_keeps_the_old_watcher_when_the_new_code_does_not_start(
     assert "staying on the old watcher" in (state / "logs" / "watch.log").read_text()
 
 
+@pytest.mark.parametrize("request_file", ["wake", "verify-typo"])
+def test_a_request_that_arrives_during_a_pass_starts_the_next_pass_at_once(
+    state: Path, monkeypatch: pytest.MonkeyPatch, request_file: str
+) -> None:
+    passes, requests = list[str](), state / "requests"
+
+    def one_pass(key: str) -> None:
+        passes.append(key)
+        if len(passes) == 2:
+            raise KeyboardInterrupt
+        (requests / request_file).write_text("")
+
+    monkeypatch.setattr(watch, "read_key", lambda title, vault: f"key from {vault}")
+    monkeypatch.setattr(watch, "update", lambda: False)
+    monkeypatch.setattr(watch, "one_pass", one_pass)
+    monkeypatch.setattr(time, "sleep", lambda seconds: pytest.fail("must not wait"))
+    with pytest.raises(KeyboardInterrupt):
+        watch.watch(600, None)
+    assert len(passes) == 2
+
+
 def test_watch_reads_the_key_once_and_wakes_early_only_for_a_new_request(
     state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     passes, sleeps, requests = list[str](), list[float](), state / "requests"
     (requests / "wake").write_text("")
+    (requests / "verify-typo").write_text("")
 
     def one_pass(key: str) -> None:
         assert not (requests / "wake").exists()
         passes.append(key)
         if len(passes) == 2:
             raise KeyboardInterrupt
-        (requests / "verify-typo").write_text("")
 
     def sleep(seconds: float) -> None:
         sleeps.append(seconds)
