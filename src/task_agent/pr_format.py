@@ -3,28 +3,34 @@
 import re
 
 ROOT_ONLY = {".github", "prompts", "makefile", "gnumakefile", "pyproject.toml", "uv.lock"}
+ROOT_ONLY |= {".python-version", ".python-versions"}
 ANY_DEPTH = {".claude", ".mcp.json", "claude.md", "claude.local.md"}
 BRANCH = re.compile(r"agent/issue-(\d+)")
 ISSUE = r"(?:[\w.-]+/[\w.-]+)?#\d+|GH-\d+|https?://github\.com/\S+/(?:issues|pull)/\d+"
-CLOSING = re.compile(rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*({ISSUE})", re.I)
-CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#\d+)[ \t]*$", re.M)
+CLOSING = re.compile(rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*+:?\s*+({ISSUE})", re.I)
+CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#[0-9]+)[ \t]*$", re.M)
 MAX_FILES = 3000
 MAX_WORDS = 250
 MAX_CHARS = 65_536
 HEADINGS = ["Why", "What changed", "Evidence", "Not done", "After merge", "Lessons"]
 OPENS = r"[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(`{3,}+(?![^\n]*`)|~{3,})"
-FENCE = rf"^{OPENS}.*?(?:^[ \t]*\2|\Z)"
+FENCE = rf"^{OPENS}.*?(?:^[ \t]*\2(?:(?<=`)`|(?<=~)~)*+[ \t]*$|\Z)"
 STOPS = rf"\n(?!\n|{OPENS}|[ \t]*<!--)"
 INLINE = rf"(?<!`)(`+)(?!`)(?:[^`\n]++|(?!\4(?!`))`++|{STOPS})*+\4(?!`)"
-SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->", re.M | re.S)
-SECTION = re.compile(r"^##[ \t]+(.*?)[ \t]*$(.*?)(?=^##[ \t]|\Z)", re.M | re.S)
+SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->|^<!--.*", re.M | re.S)
+SECTION = re.compile(
+    r"^##[ \t]++((?:[ \t]*+[^ \t\n]++)*+)[ \t]*+$(.*?)(?=^##[ \t]|\Z)", re.M | re.S
+)
+BREAK = re.compile(r"\n(?!#{1,6}[ \t])")
 
 
 def visible(body: str, fence: str) -> str:
     """A description without HTML comments and with fence for each code block; "" if too long."""
     if len(body) > MAX_CHARS:
         return ""
-    return SKIPPED.sub(lambda skipped: fence if skipped[1] else skipped[3] or " ", body)
+    return SKIPPED.sub(
+        lambda skipped: fence if skipped[1] else BREAK.sub(" ", skipped[3] or " "), body
+    )
 
 
 def word_count(body: str) -> int:
