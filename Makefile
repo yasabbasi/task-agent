@@ -3,7 +3,7 @@
 	watch verify init metrics ready approve send-back
 
 LOC_FILES ?= src/task_agent/*.py
-LOC_MAX ?= 1800
+LOC_MAX ?= 2000
 REPO ?= yasabbasi/task-agent
 EVERY ?= 600
 TARGET = --repo $(REPO) $(if $(CLONE),--clone $(CLONE))

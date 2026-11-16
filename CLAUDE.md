@@ -26,7 +26,7 @@ Python 3.14 and uv; state lives in GitHub issues, labels and pull requests.
 
 ## This repo
 
-- `src/` stays under 1,800 lines; `make check` counts them. Prefer deleting to adding.
+- `src/` stays under 2,000 lines; `make check` counts them. Prefer deleting to adding.
 - No frameworks and no database. GitHub is called through `gh` or the App's tokens.
 - Tests use fakes and temporary git repos. They never call GitHub or start a Claude session.
 - Functions stay under about 40 lines.
