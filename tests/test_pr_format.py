@@ -200,8 +200,60 @@ def test_unclosed_backtick_runs_above_a_long_line_of_backticks_are_read_quickly(
 
 def test_word_count_reads_a_long_run_of_punctuation_quickly() -> None:
     started = time.perf_counter()
-    assert pr_format.word_count("-" * (pr_format.MAX_CHARS - 1) + "a") == 1
+    assert pr_format.word_count("-" * pr_format.MAX_CHARS) == 0
     assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "fix" + " " * 64_997,
+        "fix" + "\n" * 64_997,
+        "## Why" + " " * 64_993 + "x",
+    ],
+)
+def test_a_long_run_of_whitespace_after_a_keyword_or_heading_is_read_quickly(body: str) -> None:
+    started = time.perf_counter()
+    assert pr_format.check("Add", body, "agent/issue-7", [])
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "```\n## Why\n```python\n## Output\n```",
+        "```\n## Why\n``` text\n## Output\n```",
+        "~~~\n## Why\n~~~ text\n## Output\n~~~",
+        "```\n## Why\n    ```\n## Output\n```",
+        "```\n## Why\n\t```\n## Output\n```",
+        "```\n## Why\n```~\n## Output\n```",
+    ],
+)
+def test_a_fence_closes_only_at_a_line_that_holds_the_marker_alone(block: str) -> None:
+    body = BODY.replace("```\nmake check\n```", block)
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+    assert pr_format.word_count(body) == pr_format.word_count(BODY)
+
+
+@pytest.mark.parametrize("close", ["``` \t", "   ```", "`````", "   ```` "])
+def test_a_fence_closes_at_an_indented_or_longer_marker_with_trailing_blanks(close: str) -> None:
+    body = BODY.replace("make check\n```", f"## Why\n{close}")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+
+
+def test_inline_code_stops_at_a_line_break_before_a_line_with_a_comment_start() -> None:
+    assert pr_format.visible("a ` b\nc <!-- d ` e -->\nf", "```") == "a ` b\nc  \nf"
+
+
+def test_an_unclosed_comment_that_starts_a_line_hides_everything_after_it() -> None:
+    assert pr_format.visible("a\n  <!-- b\n\nCloses #9\n\n## Why", "```") == "a\n "
+    body = BODY.replace("## Not done", "<!-- open\n\n## Not done")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == [HEADINGS_PROBLEM]
+
+
+@pytest.mark.parametrize("text", ["a ` <!-- b\n\n## Why\n", "`<!-- b\n\n## Why\n", "a <!-- b\n"])
+def test_an_unclosed_comment_start_inside_a_line_stays_visible(text: str) -> None:
+    assert pr_format.visible(text, "```") == text
 
 
 def test_a_description_over_the_character_limit_gets_one_problem_and_is_not_parsed() -> None:
