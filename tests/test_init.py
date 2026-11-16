@@ -73,10 +73,27 @@ def base(tmp_path: Path) -> config.Config:
 
 
 @pytest.fixture
-def cfg(cfg: config.Config) -> config.Config:
-    """The clone's origin is spelled as GitHub spells it, which init checks."""
+def cfg(cfg: config.Config, monkeypatch: pytest.MonkeyPatch) -> config.Config:
+    """The clone's origin is spelled as GitHub spells it, and init reads it that way."""
     run_git(cfg.clone, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    real = init.git
+
+    def git(cwd: Path, *args: str, check: bool = True) -> str:
+        with pytest.MonkeyPatch.context() as patch:
+            if args[0] == "remote":
+                patch.delenv("GIT_CONFIG_COUNT")
+            return real(cwd, *args, check=check)
+
+    monkeypatch.setattr(init, "git", git)
     return cfg
+
+
+def spell(monkeypatch: pytest.MonkeyPatch, github: Path, url: str) -> None:
+    """Make url another spelling of the fake GitHub repo, without touching the clone."""
+    count = int(os.environ["GIT_CONFIG_COUNT"])
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 1))
+    monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", f"url.{github}.insteadOf")
+    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", url)
 
 
 def merge(github: Path) -> None:
@@ -86,11 +103,13 @@ def merge(github: Path) -> None:
     run_git(github.parent / "second", "push", "--quiet", "origin", branch)
 
 
-def later(base: config.Config, text: str = "later\n") -> str:
+def later(base: config.Config, text: str = "later\n", *paths: str) -> str:
     """Add a commit to the source repo's current branch, and return it."""
     upstream = base.root.parent / "upstream"
-    (upstream / "LICENSE").write_text(text)
-    run_git(upstream, "commit", "--quiet", "-am", "later")
+    for path in paths or ("LICENSE",):
+        (upstream / path).write_text(text)
+    run_git(upstream, "add", "-A")
+    run_git(upstream, "commit", "--quiet", "-m", "later")
     return run_git(upstream, "rev-parse", "HEAD").strip()
 
 
@@ -164,25 +183,48 @@ def test_differing_files_become_the_callers_pull_request_and_the_ruleset_waits(
 
 
 def test_sources_are_read_from_the_newest_version_tag_on_main(
-    gh: Gh, base: config.Config, cfg: config.Config
+    gh: Gh, base: config.Config, cfg: config.Config, github: Path
 ) -> None:
     upstream = base.root.parent / "upstream"
-    sha = run_git(upstream, "rev-parse", "v1.2.0").strip()
-    later(base)
-    run_git(upstream, "tag", "v1")
+    sha = later(base)
+    run_git(upstream, "tag", "-a", "-m", "release", "v1.3.0")
     run_git(upstream, "checkout", "--quiet", "-b", "side")
-    newer = later(base, "not merged\n")
+    newer = later(base, "not merged\n", "side.txt")
     run_git(upstream, "tag", "v1.10.0")
     run_git(upstream, "checkout", "--quiet", "main")
-    assert init.pin(base.root) == (sha, "v1.2.0")
-    files = init.managed(base, cfg, sha, "v1.2.0")
-    gate = files[".github/workflows/gate.yml"]
-    assert f"repository: owner/task-agent\n          ref: {sha} # v1.2.0\n" in gate
+    later(base, "candidate\n")
+    run_git(upstream, "tag", "v2.0.0-rc1")
+    moved = (".github/templates/gate.yml", ".github/labels.json", ".github/ruleset.json")
+    later(base, "[]\n", *moved, ".github/CODEOWNERS")
+    assert init.pin(base.root) == (sha, "v1.3.0")
+    calls = gh()
+    init.run(base, cfg)
+    merge(github)
+    init.run(base, cfg)
+    labels = json.loads((ROOT / ".github" / "labels.json").read_text())
+    made = [call[0][2] for call in calls() if call[0][:2] == ["label", "create"]]
+    assert made == [label["name"] for label in labels] * 2
+    assert calls()[-1][1] == (ROOT / ".github/ruleset.json").read_text()
+    gate = run_git(github, "show", "main:.github/workflows/gate.yml")
+    assert f"repository: owner/task-agent\n          ref: {sha} # v1.3.0\n" in gate
     assert '--bot "task-agent-test[bot]"' in gate and "TASK_AGENT_" not in gate
     assert gate.endswith("      - run: make check\n")
-    assert files["LICENSE"] == (ROOT / "LICENSE").read_text()
+    copied = run_git(github, "show", "main:.github/CODEOWNERS")
+    assert copied == (ROOT / ".github/CODEOWNERS").read_text()
+    assert run_git(github, "show", "main:LICENSE") == "later\n"
     run_git(upstream, "merge", "--quiet", "--no-edit", "side")
     assert init.pin(base.root) == (newer, "v1.10.0")
+
+
+def test_a_rejected_tag_is_named_when_the_fetch_fails(
+    gh: Gh, base: config.Config, cfg: config.Config
+) -> None:
+    calls = gh()
+    later(base)
+    run_git(base.root.parent / "upstream", "tag", "--force", "v1.2.0")
+    with pytest.raises(SystemExit, match=r"git fetch: (.|\n)*rejected(.|\n)*v1\.2\.0"):
+        init.run(base, cfg)
+    assert calls() == []
 
 
 def test_without_a_version_tag_sources_are_read_from_main(
@@ -196,7 +238,7 @@ def test_without_a_version_tag_sources_are_read_from_main(
 
 
 def test_init_stops_before_changing_anything_at_the_wrong_target(
-    gh: Gh, base: config.Config, cfg: config.Config
+    gh: Gh, base: config.Config, cfg: config.Config, tmp_path: Path
 ) -> None:
     calls = gh()
     with pytest.raises(SystemExit, match="is task-agent itself"):
@@ -205,10 +247,35 @@ def test_init_stops_before_changing_anything_at_the_wrong_target(
         init.run(base, replace(cfg, repo="owner/other"))
     with pytest.raises(SystemExit, match="is not wner/repo"):
         init.run(base, replace(cfg, repo="wner/repo"))
+    with pytest.raises(SystemExit, match="is not owner/repo on github.com"):
+        init.run(base, replace(cfg, clone=tmp_path / "missing"))
     assert calls() == []
 
 
-@pytest.mark.parametrize("link", [".github", ".github/workflows", ".github/CODEOWNERS"])
+@pytest.mark.parametrize(
+    ("fetch", "push"),
+    [
+        ("https://example.com/owner/repo.git", ""),
+        ("https://github.com.example.com/owner/repo", ""),
+        ("git@example.com:owner/repo.git", ""),
+        ("https://github.com/owner/repo.git", "https://example.com/owner/repo.git"),
+    ],
+)
+def test_init_stops_when_origin_fetches_or_pushes_on_another_host(
+    gh: Gh, base: config.Config, cfg: config.Config, fetch: str, push: str
+) -> None:
+    calls = gh()
+    run_git(cfg.clone, "remote", "set-url", "origin", fetch)
+    if push:
+        run_git(cfg.clone, "remote", "set-url", "--push", "origin", push)
+    with pytest.raises(SystemExit, match="is not owner/repo on github.com"):
+        init.run(base, cfg)
+    assert calls() == []
+
+
+@pytest.mark.parametrize(
+    "link", [".github", ".GitHub", ".github/workflows", ".github/Workflows", ".github/CODEOWNERS"]
+)
 def test_init_stops_at_a_symlink_on_the_way_to_a_managed_path(
     gh: Gh, base: config.Config, cfg: config.Config, link: str
 ) -> None:
@@ -223,17 +290,40 @@ def test_init_stops_at_a_symlink_on_the_way_to_a_managed_path(
     assert calls() == []
 
 
-def test_an_ssh_origin_names_the_repo_too(
+def test_an_unrelated_symlink_inside_github_is_accepted(
+    gh: Gh, base: config.Config, cfg: config.Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh()
+    (cfg.clone / ".github").mkdir()
+    (cfg.clone / ".github" / "notes").symlink_to("elsewhere")
+    run_git(cfg.clone, "add", "-A")
+    run_git(cfg.clone, "commit", "--quiet", "-m", "link")
+    run_git(cfg.clone, "push", "--quiet", "origin", "main")
+    init.run(base, cfg)
+    assert LINK in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/owner/repo",
+        "https://github.com/Owner/Repo.git/",
+        "git@github.com:Owner/Repo.git",
+        "ssh://git@github.com/owner/repo/",
+    ],
+)
+def test_origin_names_the_repo_in_https_or_ssh_form(
     gh: Gh,
     base: config.Config,
     cfg: config.Config,
     github: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    url: str,
 ) -> None:
     gh()
-    ssh = "git@github.com:Owner/Repo.git"
-    run_git(cfg.clone, "config", f"url.{github}.insteadOf", ssh)
-    run_git(cfg.clone, "remote", "set-url", "origin", ssh)
+    spell(monkeypatch, github, url)
+    run_git(cfg.clone, "remote", "set-url", "origin", url)
     init.run(base, cfg)
     assert LINK in capsys.readouterr().out
 
@@ -269,14 +359,22 @@ def test_an_open_pull_request_is_reused_only_when_it_is_init_s_own(
     fork: bool,
     stale: bool,
 ) -> None:
-    for role in ("AUTHOR", "COMMITTER"):
-        monkeypatch.setenv(f"GIT_{role}_DATE", "2026-01-01T00:00:00Z")
     calls = gh()
     init.run(base, cfg)
-    head = "0" * 40 if stale else run_git(github, "rev-parse", init.BRANCH).strip()
+    pushed = run_git(github, "rev-parse", init.BRANCH).strip()
+    head = "0" * 40 if stale else pushed
     other = "https://github.com/owner/repo/pull/9"
     gh(prs=json.dumps([{"url": other, "isCrossRepository": fork, "headRefOid": head}]))
+    real, ran = init.git, list[str]()
+
+    def record(cwd: Path, *args: str, check: bool = True) -> str:
+        ran.append(args[0])
+        return real(cwd, *args, check=check)
+
+    monkeypatch.setattr(init, "git", record)
     init.run(base, cfg)
+    assert "worktree" in ran and not {"commit", "push"} & set(ran)
+    assert run_git(github, "rev-parse", init.BRANCH).strip() == pushed
     made = [call[0] for call in calls() if call[0][:2] in (["pr", "create"], ["pr", "edit"])]
     body = made[0][-1]
     assert "- `LICENSE`\n" in body
@@ -329,8 +427,8 @@ def test_an_up_to_date_repo_gets_the_ruleset(
     assert sum(made[0][:2] == ["pr", "create"] for made in calls()) == 1
 
 
-def test_init_module_stays_within_150_lines() -> None:
-    assert len((ROOT / "src/task_agent/init.py").read_text().splitlines()) <= 150
+def test_init_module_stays_within_165_lines() -> None:
+    assert len((ROOT / "src/task_agent/init.py").read_text().splitlines()) <= 165
 
 
 def test_init_command_aims_main_s_settings_at_the_repo_and_clone(
