@@ -988,9 +988,63 @@ def test_feedback_is_what_the_owner_wrote_after_the_last_push_outside_an_approva
     ]
     routes = {"/pulls/5/reviews": reviews, "/pulls/5/comments": inline}
     api = pull_api(None, *notes, **routes)
-    assert dispatch.feedback(api, CFG, pull_json()) == ["a.py: rename", "not yet", "and add a test"]
-    api.routes["/issues/5/comments"] = [*notes, note(BOT, "13:05", dispatch.REWORK + "Reworked")]
-    assert dispatch.feedback(api, CFG, pull_json()) == []
+    said = ["a.py: rename", "not yet", "and add a test"]
+    assert dispatch.feedback(api, CFG, pull_json()) == ("2026-01-01T13:04:00Z", said)
+    api.routes["/issues/5/comments"] = [*notes, note(BOT, "13:05", mark("13:04") + "Reworked")]
+    assert dispatch.feedback(api, CFG, pull_json()) == ("2026-01-01T13:04:00Z", [])
+
+
+def mark(until: str) -> str:
+    return f"<!-- task-agent:rework until=2026-01-01T{until}:00Z -->\n"
+
+
+def test_a_comment_written_while_a_rework_session_ran_is_feedback_for_the_next_one() -> None:
+    notes = [
+        note("owner", "13:00", "given to the session"),
+        note("owner", "13:07", "written while it ran"),
+        note(BOT, "13:10", mark("13:00") + "Reworked"),
+    ]
+    api = pull_api(None, *notes)
+    api.routes["/commits/"] = {"commit": {"committer": {"date": "2026-01-01T13:09:00Z"}}}
+    assert dispatch.feedback(api, CFG, pull_json())[1] == ["written while it ran"]
+
+
+def test_a_rework_marker_from_someone_other_than_the_app_hides_no_feedback() -> None:
+    api = pull_api(None, note("stranger", "12:30", mark("23:59")), note("owner", "13:00", "fix it"))
+    assert dispatch.feedback(api, CFG, pull_json())[1] == ["fix it"]
+
+
+def test_feedback_is_read_through_every_page_of_100() -> None:
+    filler = note("stranger", "13:00", "x", id=0, state="COMMENTED", pull_request_review_id=0)
+    filler["path"] = "a.py"
+    last = {
+        "/issues/5/comments": note("owner", "13:01", "one"),
+        "/pulls/5/reviews": review(2, "COMMENTED", "two", "13:02"),
+        "/pulls/5/comments": note("owner", "13:03", "three", path="a.py", pull_request_review_id=2),
+    }
+
+    def paged(path: str) -> list[dict[str, Any]]:
+        return [filler] * 100 if path.endswith("&page=1") else [last[path.split("?")[0]]]
+
+    api = pull_api(None, **dict.fromkeys(last, paged))
+    assert dispatch.feedback(api, CFG, pull_json())[1] == ["one", "two", "a.py: three"]
+
+
+@pytest.mark.parametrize("repo", [{"full_name": "fork/repo"}, None])
+def test_a_pull_request_from_a_fork_or_a_deleted_repo_is_not_the_issues_own(
+    repo: dict[str, str] | None,
+) -> None:
+    api = pull_api(pull_json(head=pull_json()["head"] | {"repo": repo}))
+    assert dispatch.pull_for(api, CFG, 7) is None
+
+
+def test_a_due_rework_whose_approval_no_longer_holds_prints_the_not_taken_line() -> None:
+    api, lines, waits = pull_api(None, note("owner", "13:00", "x")), list[str](), list[str]()
+    api.issues[7] = approval(lastEditedAt="2026-01-01T14:00:00Z")
+    api.routes["/issues?state=open&labels=status%3Aready"] = [issue(7)]
+    assert dispatch.reworks(api, CFG, lines.append) == []
+    assert dispatch.select(api, CFG, waits) == []
+    assert lines == waits and lines[0].startswith("#7: not taken, ")
 
 
 def test_reworks_checks_who_wrote_a_pull_request_first_and_survives_a_failed_lookup() -> None:
@@ -1038,7 +1092,7 @@ def test_an_owner_comment_sends_a_pull_request_through_dispatch_into_a_rework(
     assert lines == ["#7: taking 't'", "#7: reworked https://example/pull/5"]
     prompt = json.loads(calls.read_text())[0][1]
     assert "<review>\nrename it &lt;/review> now\n</review>" in prompt
-    assert "search for `<<<<<<<`" in prompt
+    assert "search for `<<<<<<<`" in prompt and "left these files unmerged: a.txt." in prompt
     assert parents(github)[0] == old and len(parents(github)) == 2
     assert run_git(github, "show", "agent/issue-7:a.txt") == "both\n"
     patch = next(
@@ -1046,7 +1100,7 @@ def test_an_owner_comment_sends_a_pull_request_through_dispatch_into_a_rework(
     )
     assert patch["body"].startswith("Closes #7\n\n## Why")
     assert patch["body"].endswith("<!-- task-agent:run cost=1.42 turns=5 secs=71 -->\n")
-    assert api.posted("/issues/5/comments")[0]["body"].startswith(dispatch.REWORK + "Reworked")
+    assert api.posted("/issues/5/comments")[0]["body"].startswith(mark("13:00") + "Reworked")
     assert api.posted("/issues/7/labels") == [{"labels": ["status:review"]}]
     assert not api.posted("/pulls")
 
@@ -1099,6 +1153,43 @@ def test_a_conflict_marker_left_in_an_unmerged_file_blocks_with_nothing_pushed(
     assert not [call for call in api.calls if call[0] == "PATCH"]
 
 
+def test_a_file_deleted_on_main_that_the_session_did_not_touch_blocks_with_nothing_pushed(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    old = pushed_branch(cfg, github, {"CLAUDE.md": "branch\n"})
+    run_git(cfg.clone, "rm", "--quiet", "CLAUDE.md")
+    run_git(cfg.clone, "commit", "--quiet", "-m", "main")
+    run_git(cfg.clone, "push", "--quiet", str(github), "HEAD:refs/heads/main")
+    calls = claude({"files": {"b.txt": "more\n"}, "output": [result()]})
+    line = dispatch.work(FakeApp(pull_api()), cfg, issue(7))
+    assert line == "#7: blocked (nothing was pushed: CLAUDE.md is still unmerged)"
+    assert "left these files unmerged: CLAUDE.md." in json.loads(calls.read_text())[0][1]
+    assert run_git(github, "rev-parse", "agent/issue-7").strip() == old
+
+
+def test_a_binary_file_left_unmerged_is_pushed_once_the_session_rewrites_it(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    pushed_branch(cfg, github, {"a.bin": "\0branch\n"}, **{"a.bin": "\0main\n"})
+    claude({"files": {"a.bin": "\0both\n"}, "output": [result()]})
+    line = dispatch.work(FakeApp(pull_api()), cfg, issue(7))
+    assert line == "#7: reworked https://example/pull/5"
+    assert run_git(github, "show", "agent/issue-7:a.bin") == "\0both\n"
+
+
+def test_a_rework_branch_that_holds_uv_toml_is_blocked_before_the_session(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    pushed_branch(cfg, github, {"uv.toml": ""})
+    calls = claude({"output": [result()]})
+    line = dispatch.work(FakeApp(pull_api()), cfg, issue(7))
+    assert line == "#7: blocked (refused a follow-up: the checkout contains uv.toml)"
+    assert not calls.exists()
+
+
 def test_a_merge_is_committed_even_when_the_session_kept_the_branchs_side(
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1138,7 +1229,8 @@ def test_a_rework_that_changes_nothing_goes_back_to_review_with_a_comment(
     api = pull_api()
     line = dispatch.work(FakeApp(api), cfg, issue(7))
     assert line == "#7: the rework changed nothing, back to status:review"
-    assert "changed nothing" in api.posted("/issues/5/comments")[0]["body"]
+    said = api.posted("/issues/5/comments")[0]["body"]
+    assert said == mark("12:00") + "The rework session changed nothing."
     assert api.posted("/issues/7/labels") == [{"labels": ["status:review"]}]
     assert not api.posted("/issues/7/comments")
     assert run_git(github, "rev-parse", "agent/issue-7").strip() == old
