@@ -51,6 +51,9 @@ make install-skill
   App pull requests may not touch protected paths or close any issue but their own.
 - **The ruleset on `main`** requires the `gate` check and the owner's approval after the last
   push. No agent pull request merges without both, and the App cannot change workflows.
+- **After a merge, close-out tidies up.** It files each `rule:` line under Lessons as a triage
+  issue, labels a pull request the App didn't write `human-authored`, and clears the status
+  labels of the issues it closed.
 
 [docs/operations.md](docs/operations.md) covers the watcher, its requests and its log.
 
