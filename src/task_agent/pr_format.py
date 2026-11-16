@@ -10,21 +10,26 @@ CLOSING = re.compile(rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*({I
 CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#\d+)[ \t]*$", re.M)
 MAX_FILES = 3000
 MAX_WORDS = 250
+MAX_CHARS = 65_536
 HEADINGS = ["Why", "What changed", "Evidence", "Not done", "After merge", "Lessons"]
-FENCE = r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(```|~~~).*?(?:^[ \t]*\2|\Z)"
-INLINE = r"(?<!`)(`+)(?!`)(?:[^\n]|\n(?!\n))+?(?<!`)\4(?!`)"
+OPENS = r"[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(`{3,}+(?![^\n]*`)|~{3,})"
+FENCE = rf"^{OPENS}.*?(?:^[ \t]*\2|\Z)"
+STOPS = rf"\n(?!\n|{OPENS}|[ \t]*<!--)"
+INLINE = rf"(?<!`)(`+)(?!`)(?:[^`\n]++|(?!\4(?!`))`++|{STOPS})*+\4(?!`)"
 SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->", re.M | re.S)
 SECTION = re.compile(r"^##[ \t]+(.*?)[ \t]*$(.*?)(?=^##[ \t]|\Z)", re.M | re.S)
 
 
 def visible(body: str, fence: str) -> str:
-    """A description with each fenced code block replaced by fence and HTML comments removed."""
+    """A description without HTML comments and with fence for each code block; "" if too long."""
+    if len(body) > MAX_CHARS:
+        return ""
     return SKIPPED.sub(lambda skipped: fence if skipped[1] else skipped[3] or " ", body)
 
 
 def word_count(body: str) -> int:
     """The words in a description, not counting fenced code blocks and HTML comments."""
-    return len(re.findall(r"\S*[^\W_]\S*", visible(body, " ")))
+    return len(re.findall(r"[^\W_]\S*", visible(body, " ")))
 
 
 def protected(path: str) -> bool:
@@ -41,12 +46,14 @@ def check(title: str, body: str, branch: str, files: list[str]) -> list[str]:
     if not (match := BRANCH.fullmatch(branch)):
         return [*problems, f"the branch must be named agent/issue-N, not {branch}"]
     issue = f"#{match[1]}"
+    if CLOSING.search(title):
+        problems.append("the title may not close an issue")
+    if len(body) > MAX_CHARS:
+        return [*problems, f"the description has {len(body)} characters; the limit is {MAX_CHARS}"]
     if CLOSING_LINE.findall(body) != [issue]:
         problems.append(f"the description needs exactly one closing line, `Closes {issue}`")
     if others := sorted({ref for ref in CLOSING.findall(body) if ref != issue}):
         problems.append("the description may close only its own issue, not " + ", ".join(others))
-    if CLOSING.search(title):
-        problems.append("the title may not close an issue")
     sections = SECTION.findall(visible(body, "```"))
     if [name for name, _ in sections] != HEADINGS:
         wanted = ", ".join(f"`## {name}`" for name in HEADINGS)
