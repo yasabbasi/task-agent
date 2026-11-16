@@ -120,6 +120,11 @@ def test_prompts_name_every_protected_path_and_the_refused_commands() -> None:
     assert "Every section needs text" in agent and "No emoji" in agent
 
 
+def test_prompts_carry_the_lessons_moved_into_them() -> None:
+    assert "Edit and Write tools" in (ROOT / "prompts" / "rules.md").read_text()
+    assert "to see it fail" in (ROOT / "prompts" / "agent.md").read_text()
+
+
 TEMPLATES = sorted((ROOT / ".github" / "templates").glob("*.yml"))
 
 
