@@ -7,7 +7,7 @@ Work on issue #{number} in {repo}.
 </issue>
 {review}
 
-Make the smallest change that satisfies every "Done when" item, with tests. Run `make check` until it passes.
+Make the smallest change that satisfies every "Done when" item, with tests. Write each new test first and run it against the unchanged code, to see it fail for the reason you expect. Run `make check` until it passes.
 
 When you're done, return:
 
