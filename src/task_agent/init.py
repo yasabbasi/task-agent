@@ -20,6 +20,7 @@ COPIED = (
 )
 WORKFLOWS = ("gate.yml", "readiness.yml", "close-out.yml")
 VERSION = re.compile(r"v\d+\.\d+\.\d+")
+ORIGIN = r"(https://github\.com/|git@github\.com:|ssh://git@github\.com/){}(\.git)?/?"
 FREE = "warning: {} is private and its owner is on the free plan, so rulesets are not enforced"
 
 
@@ -36,7 +37,7 @@ def show(clone: Path, path: str, ref: str = "origin/main", check: bool = True) -
 
 def pin(root: Path) -> tuple[str, str]:
     """Fetch origin with its tags; the commit every source is read from, and its name."""
-    git(root, "fetch", "--quiet", "--tags", "origin")
+    git(root, "fetch", "--tags", "origin")
     tags = git(root, "tag", "--merged", "origin/main", "--sort=-v:refname", "--list", "v*")
     found = [tag for tag in tags.split() if VERSION.fullmatch(tag)]
     sha = git(root, "rev-parse", f"{found[0] if found else 'origin/main'}^{{commit}}").strip()
@@ -79,8 +80,10 @@ def managed(base: Config, target: Config, sha: str, tag: str) -> dict[str, str]:
 
 
 def propose(target: Config, changed: dict[str, str]) -> str:
-    """Commit the files on a branch in a temporary worktree, push it, and return the PR's link."""
+    """Bring the branch to the files on top of main, pushing only a change; the PR's link."""
     git(target.clone, "worktree", "prune")
+    head = "".join(git(target.clone, "ls-remote", "origin", f"refs/heads/{BRANCH}").split()[:1])
+    git(target.clone, "fetch", "--quiet", "origin", BRANCH, check=False)
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp) / "init"
         git(target.clone, "worktree", "add", "--quiet", "-B", BRANCH, str(tree), "origin/main")
@@ -89,9 +92,12 @@ def propose(target: Config, changed: dict[str, str]) -> str:
                 (tree / path).parent.mkdir(parents=True, exist_ok=True)
                 (tree / path).write_text(text)
             git(tree, "add", "--", *changed)
-            git(tree, "commit", "--quiet", "-m", TITLE)
-            git(tree, "push", "--quiet", "--force", "origin", BRANCH)
-            head = git(tree, "rev-parse", "HEAD").strip()
+            new = [git(tree, "rev-parse", "origin/main").strip(), git(tree, "write-tree").strip()]
+            old = git(tree, "rev-parse", f"{head}^", f"{head}^{{tree}}", check=False).split()
+            if not head or old != new:
+                git(tree, "commit", "--quiet", "-m", TITLE)
+                git(tree, "push", "--quiet", "--force", "origin", BRANCH)
+                head = git(tree, "rev-parse", "HEAD").strip()
         finally:
             git(target.clone, "worktree", "remove", "--force", str(tree))
     aimed = ["--repo", target.repo, "--head", BRANCH]
@@ -115,17 +121,19 @@ def ruleset(repo: str, text: str) -> None:
 
 def steps(base: Config, target: Config) -> None:
     repo = target.repo
-    url = git(target.clone, "config", "--get", "remote.origin.url", check=False).strip().lower()
     if repo.lower() == base.repo.lower():
         raise SystemExit(f"{repo} is task-agent itself; its workflows are written by hand")
-    if not url.removesuffix(".git").endswith((f"/{repo.lower()}", f":{repo.lower()}")):
-        raise SystemExit(f"origin of {target.clone} is not {repo}")
+    urls = [("remote", "get-url", "origin"), ("remote", "get-url", "--push", "origin")]
+    found = [git(target.clone, *url, check=False).strip() for url in urls * target.clone.is_dir()]
+    wanted = re.compile(ORIGIN.format(re.escape(repo)), re.IGNORECASE)
+    if not found or not all(wanted.fullmatch(url) for url in found):
+        raise SystemExit(f"origin of {target.clone} is not {repo} on github.com")
     sha, tag = pin(base.root)
     git(target.clone, "fetch", "--quiet", "origin", "main")
     files = managed(base, target, sha, tag)
-    above = {str(up) for path in files for up in (Path(path), *Path(path).parents)} - {"."}
-    listed = git(target.clone, "ls-tree", "origin/main", "--", *above).splitlines()
-    if any(line.startswith("120000") for line in listed):
+    above = {str(up).lower() for path in files for up in (Path(path), *Path(path).parents)}
+    listed = git(target.clone, "ls-tree", "-r", "-t", "-z", "origin/main").split("\0")
+    if any(e.startswith("120000") and e.partition("\t")[2].lower() in above for e in listed):
         raise SystemExit(f"{repo}: a managed path or a folder above it is a symlink on main")
     settings(repo, show(base.root, ".github/labels.json", sha))
     changed = {p: text for p, text in files.items() if show(target.clone, p, check=False) != text}
