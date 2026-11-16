@@ -554,7 +554,7 @@ def publish(
         raise Blocked(f"the work is on {link}, but its description fails:\n\n{problems}", result)
     if pull:
         api("PATCH", f"/pulls/{pull['number']}", {"title": title, "body": body})
-        api("POST", notes, {"body": mark + "Reworked:see the new commit and description."})
+        api("POST", notes, {"body": mark + "Reworked: see the new commit and description."})
     else:
         new, done = {"title": title, "head": branch, "base": "main", "body": body}, "opened"
         pull = api("POST", "/pulls", new)

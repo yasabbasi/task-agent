@@ -1100,7 +1100,8 @@ def test_an_owner_comment_sends_a_pull_request_through_dispatch_into_a_rework(
     )
     assert patch["body"].startswith("Closes #7\n\n## Why")
     assert patch["body"].endswith("<!-- task-agent:run cost=1.42 turns=5 secs=71 -->\n")
-    assert api.posted("/issues/5/comments")[0]["body"].startswith(mark("13:00") + "Reworked")
+    said = mark("13:00") + "Reworked: see the new commit and description."
+    assert api.posted("/issues/5/comments")[0]["body"] == said
     assert api.posted("/issues/7/labels") == [{"labels": ["status:review"]}]
     assert not api.posted("/pulls")
 
