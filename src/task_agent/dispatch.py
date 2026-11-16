@@ -160,6 +160,27 @@ def select(api: Api, cfg: Config, waits: list[str]) -> list[Json]:
     return sorted(picks, key=priority)
 
 
+def blockers(app: App, api: Api, issue: Json) -> list[str]:
+    """Each dependency of a task that is not closed as completed, with why it still holds."""
+    held = []
+    for repo, number in readiness.depends_on(readiness.parse_body(issue["body"]), api.repo):
+        try:
+            other = api if repo == api.repo else app.token(repo, issues="read")
+            dep: Json = other("GET", f"/issues/{number}")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 404):
+                raise
+            dep = {}
+        if dep.get("state") == "open":
+            stuck = any(lb["name"] == "status:blocked" for lb in dep["labels"])
+            why = "blocked" if stuck else "open"
+        else:
+            why = (dep.get("state_reason") or dep.get("state", "not found")).replace("_", " ")
+        if why != "completed":
+            held.append(f"{'' if repo == api.repo else repo}#{number} ({why})")
+    return held
+
+
 def set_status(api: Api, number: int, status: str) -> None:
     """Add the new status label first, so a failed call never leaves an issue with none."""
     for label in api("POST", f"/issues/{number}/labels", {"labels": [status]}):
@@ -482,7 +503,9 @@ def dispatch(app: App, cfg: Config, dry_run: bool = False, out: Out = say) -> No
     """One pass over one repo: say what is taken and refused, then each result as it comes."""
     api = app.token(cfg.repo, issues="read", pull_requests="read")
     waits: list[str] = []
-    tasks = select(api, cfg, waits)
+    found = [(task, blockers(app, api, task)) for task in select(api, cfg, waits)]
+    waits += [f"#{t['number']}: waiting on {', '.join(held)}" for t, held in found if held]
+    tasks = [task for task, held in found if not held]
     for task in tasks:
         out(f"#{task['number']}: {'would take' if dry_run else 'taking'} {task['title']!r}")
     for line in waits or ([] if tasks else [waiting(api, cfg)]):

@@ -46,6 +46,12 @@ def path_checker(root: Path) -> Callable[[str], bool]:
     return exists
 
 
+def depends_on(fields: dict[str, str], repo: str) -> list[tuple[str, int]]:
+    """The (repo, number) of each issue named in Depends on, as `#N` or `owner/repo#N`."""
+    found = re.findall(r"([\w.-]+/[\w.-]+)?#(\d+)", fields["depends"])
+    return list(dict.fromkeys((other or repo, int(number)) for other, number in found))
+
+
 def check(fields: dict[str, str], exists: Callable[[str], bool]) -> list[Result]:
     """The readiness checks for one parsed issue, each with its verdict."""
     words = len(fields["what"].split())
@@ -58,10 +64,15 @@ def check(fields: dict[str, str], exists: Callable[[str], bool]) -> list[Result]
         start = f"Starting point paths exist (missing: {missing})"
     else:
         start = f"Starting point paths exist ({len(paths)} checked)"
+    needs = ", ".join(f"{repo}#{number}" for repo, number in depends_on(fields, ""))
     return [
         (3 <= words <= 80, f"What is stated in 3 to 80 words ({words})"),
         (bool(items), f"Done when has at least one checklist item ({len(items)})"),
         (bool(paths) and not missing, start),
+        *(
+            [(True, f"Depends on {needs}, and waits until each is closed as completed")]
+            * bool(needs)
+        ),
     ]
 
 

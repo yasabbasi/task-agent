@@ -629,6 +629,72 @@ def test_a_dry_run_lists_tasks_without_taking_them(monkeypatch: pytest.MonkeyPat
     assert lines == ["#3: would take 't3'"]
 
 
+class OneRepoApp(FakeApp):
+    """An App installed on owner/repo and other/repo only."""
+
+    def token(self, repo: str, **permissions: str) -> FakeApi:
+        if repo not in ("owner/repo", "other/repo"):
+            raise urllib.error.HTTPError("u", 404, "Not Found", Message(), io.BytesIO())
+        return super().token(repo, **permissions)
+
+
+def dependency(state: str, reason: str | None = None, *labels: str) -> dict[str, Any]:
+    return {"state": state, "state_reason": reason, "labels": [{"name": name} for name in labels]}
+
+
+def missing(_path: str) -> Any:
+    raise urllib.error.HTTPError("u", 404, "Not Found", Message(), io.BytesIO())
+
+
+@pytest.mark.parametrize(
+    ("found", "why"),
+    [
+        (dependency("open"), "open"),
+        (dependency("open", "reopened", "status:blocked"), "blocked"),
+        (dependency("closed", "not_planned"), "not planned"),
+        (dependency("closed"), "closed"),
+        (missing, "not found"),
+    ],
+)
+def test_a_task_waits_on_a_dependency_that_is_not_closed_as_completed(
+    found: Any, why: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = issue(14, body="### Depends on\n\n#12\n")
+    monkeypatch.setattr(dispatch, "select", lambda api, cfg, waits: [task])
+    monkeypatch.setattr(dispatch, "work", lambda *a: pytest.fail("a waiting task is not taken"))
+    lines = list[str]()
+    dispatch.dispatch(FakeApp(FakeApi({"/issues/12": found})), CFG, out=lines.append)
+    assert lines == [f"#14: waiting on #12 ({why})"]
+
+
+def test_a_dependency_in_another_repo_is_read_with_an_issues_read_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = issue(14, body="### Depends on\n\n#12, other/repo#9 and far/away#2\n")
+    monkeypatch.setattr(dispatch, "select", lambda api, cfg, waits: [task])
+    routes = {"/issues/12": dependency("open", None, "status:blocked"), "/issues/9": missing}
+    app, lines = OneRepoApp(FakeApi(routes)), list[str]()
+    dispatch.dispatch(app, CFG, dry_run=True, out=lines.append)
+    assert lines == [
+        "#14: waiting on #12 (blocked), other/repo#9 (not found), far/away#2 (not found)"
+    ]
+    assert app.asked[1:] == [("other/repo", {"issues": "read"})]
+
+
+def test_a_task_is_taken_once_every_dependency_is_closed_as_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = issue(14, body="### Depends on\n\n#12\nother/repo#9\n")
+    monkeypatch.setattr(dispatch, "select", lambda api, cfg, waits: [task])
+    monkeypatch.setattr(dispatch, "work", lambda app, cfg, task: f"#{task['number']}: opened")
+    done = dependency("closed", "completed")
+    api, lines = FakeApi({"/issues/12": dependency("open"), "/issues/9": done}), list[str]()
+    dispatch.dispatch(OneRepoApp(api), CFG, out=lines.append)
+    api.routes["/issues/12"] = done
+    dispatch.dispatch(OneRepoApp(api), CFG, out=lines.append)
+    assert lines == ["#14: waiting on #12 (open)", "#14: taking 't14'", "#14: opened"]
+
+
 def test_nothing_ready_names_the_triage_issues_that_only_lack_the_label(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     body = "### What\n\nAdd a thing here.\n\n### Done when\n\n- [ ] it works\n\n"
