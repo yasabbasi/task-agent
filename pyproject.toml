@@ -8,7 +8,9 @@ authors = [
     { name = "yas", email = "355981534+yasabbasi@users.noreply.github.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "pyjwt[crypto]==2.15.1",
+]
 
 [project.scripts]
 task-agent = "task_agent.cli:main"
@@ -25,6 +27,25 @@ dev = [
     "ruff==0.17.5",
     "yamllint==1.38.0",
 ]
+
+# Dispatcher settings. Agents may not change this file; gate enforces it.
+[tool.task-agent]
+repo = "yasabbasi/task-agent"
+app_slug = "yasabbasi-task-agent"
+client_id = "Iv23liYdIh7AhCEf90b5"
+key_title = "task-agent key"
+key_vault = "Work"
+parallel = 3
+max_turns = 40
+budget_usd = 3.0
+timeout_min = 50
+agent_commands = []
+
+# Every repo the watcher covers, with its clone relative to this folder.
+[tool.task-agent.repos]
+"yasabbasi/task-agent" = "."
+"yasabbasi/data-pipeline" = "../data-pipeline"
+"yasabbasi/mcp-server" = "../mcp-server"
 
 [tool.ruff]
 line-length = 100

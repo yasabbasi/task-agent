@@ -70,3 +70,39 @@ def test_task_skill_and_form_use_the_headings_the_parser_reads() -> None:
     assert re.match(r"---\nname: task\ndescription: \S.*\n---\n", skill)
     assert re.findall(r"^   ### (.+)$", skill, flags=re.M) == list(readiness.HEADINGS)
     assert re.findall(r"^      label: (.+)$", form, flags=re.M) == list(readiness.HEADINGS)
+
+
+def test_ruleset_requires_the_owner_and_the_gate_from_actions() -> None:
+    ruleset = json.loads((ROOT / ".github" / "ruleset.json").read_text())
+    rules = {rule["type"]: rule.get("parameters", {}) for rule in ruleset["rules"]}
+    assert ruleset["name"] == "main" and ruleset["enforcement"] == "active"
+    assert {actor["bypass_mode"] for actor in ruleset["bypass_actors"]} == {"pull_request"}
+    assert {"deletion", "non_fast_forward"} <= set(rules)
+    review = rules["pull_request"]
+    assert review["require_code_owner_review"] and review["require_last_push_approval"]
+    assert review["allowed_merge_methods"] == ["squash"]
+    checks = rules["required_status_checks"]["required_status_checks"]
+    assert checks == [{"context": "gate", "integration_id": 15368}]
+
+
+def test_gate_checks_the_pull_request_before_it_runs_the_change() -> None:
+    gate = (ROOT / ".github" / "workflows" / "gate.yml").read_text()
+    order = ["default_branch", "task-agent pr-check", "check out the change", "make check"]
+    assert sorted(order, key=gate.index) == order
+    assert "${{" not in "".join(line for line in gate.splitlines() if "run:" in line)
+
+
+def test_workflows_pin_actions_by_commit() -> None:
+    for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
+        for used in re.findall(r"uses: (\S+)", workflow.read_text()):
+            assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", used), used
+
+
+def test_prompts_name_every_protected_path_and_the_refused_commands() -> None:
+    rules = (ROOT / "prompts" / "rules.md").read_text()
+    for name in (".github/", ".claude/", ".mcp.json", "prompts/", "Makefile", "pyproject.toml"):
+        assert f"`{name}`" in rules
+    assert "`uv.lock`" in rules and "`CLAUDE.md`" in rules
+    assert "git command is refused" in rules and "make loc" in rules
+    agent = (ROOT / "prompts" / "agent.md").read_text()
+    assert set(re.findall(r"\{(\w+)\}", agent)) == {"number", "repo", "title", "body", "review"}

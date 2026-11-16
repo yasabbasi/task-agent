@@ -57,7 +57,8 @@ the readiness check reads both the same way.
    ```
 
 6. **Check.** From the target clone, pipe the body into
-   `uv run --project "${CLAUDE_SKILL_DIR}/../../.." task-agent ready` and fix every `fail` line.
+   `uv run --project "$(cd -P "${CLAUDE_SKILL_DIR}/../../.." && pwd)" task-agent ready` and fix
+   every `fail` line. The `cd -P` follows the link that `make install-skill` makes.
 7. **Confirm.** Show the title and body, and ask the user to confirm or edit.
 8. **File.** Run `gh issue create --repo <owner/name> --title "<title>" --body-file -
    --label "status:triage,type:<type>,priority:<priority>,effort:<effort>"` with the body on

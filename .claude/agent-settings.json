@@ -1,0 +1,79 @@
+{
+  "disableAllHooks": true,
+  "disableClaudeAiConnectors": true,
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash(uv run pytest)",
+      "Bash(uv run pytest *)",
+      "Bash(uv run ruff *)",
+      "Bash(make check)",
+      "Bash(make lint)",
+      "Bash(make test)",
+      "Bash(make format)"
+    ],
+    "deny": [
+      "Edit(.git)",
+      "Edit(.github/**)",
+      "Edit(.claude/**)",
+      "Edit(.mcp.json)",
+      "Edit(prompts/**)",
+      "Edit(Makefile)",
+      "Edit(pyproject.toml)",
+      "Edit(uv.lock)",
+      "Edit(CLAUDE.md)",
+      "Write(.git)",
+      "Write(.github/**)",
+      "Write(.claude/**)",
+      "Write(.mcp.json)",
+      "Write(prompts/**)",
+      "Write(Makefile)",
+      "Write(pyproject.toml)",
+      "Write(uv.lock)",
+      "Write(CLAUDE.md)",
+      "Read(~/.ssh/**)",
+      "Read(~/.config/**)",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(op *)",
+      "Bash(security *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(ssh *)",
+      "Bash(sudo *)",
+      "mcp__*",
+      "Agent",
+      "Skill",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "blockReadsOutsideWorkingDirectories": true,
+    "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": false,
+    "filesystem": {
+      "denyRead": [
+        "~/"
+      ],
+      "allowRead": [
+        "$WORKTREE",
+        "$GITDIR",
+        "$CLONE/pyproject.toml"
+      ],
+      "denyWrite": [
+        "$WORKTREE/.git"
+      ]
+    },
+    "network": {
+      "allowedDomains": []
+    }
+  }
+}
