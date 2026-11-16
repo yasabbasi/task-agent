@@ -18,7 +18,11 @@ flowchart LR
 
 ## Key numbers
 
+<!-- metrics:start -->
 None yet. The loop's metrics appear here once tasks have run.
+<!-- metrics:end -->
+
+`make metrics PUBLISH=1` opens a pull request from the App that refreshes this table.
 
 ## Quickstart
 
