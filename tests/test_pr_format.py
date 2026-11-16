@@ -146,6 +146,35 @@ def test_word_count_skips_code_blocks_and_comments() -> None:
     assert pr_format.word_count("one two\n\n```sh\nmake check\n```\n<!-- a\nnote -->three") == 3
 
 
+def test_a_comment_start_in_inline_code_does_not_open_a_comment() -> None:
+    body = BODY.replace("Because.", "Because `<!--` was read as a comment.") + "<!-- run -->"
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+    assert pr_format.word_count("a `<!--` b\n\n## Why\n\nc <!-- run -->") == 4
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "~~~\n## Why\n\n## Output\n~~~",
+        "- ```\n  ## Why\n\n  ## Output\n  ```",
+        "1. ~~~sh\n## Why\n~~~",
+    ],
+)
+def test_tilde_fences_and_fences_in_list_items_are_code_blocks(block: str) -> None:
+    body = BODY.replace("```\nmake check\n```", block)
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+    assert pr_format.word_count(body) == pr_format.word_count(BODY)
+
+
+def test_an_unterminated_fence_hides_the_headings_after_it() -> None:
+    body = BODY.replace("make check\n```", "make check")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == [HEADINGS_PROBLEM]
+
+
+def test_word_count_counts_only_tokens_with_a_letter_or_digit() -> None:
+    assert pr_format.word_count("## Why\n\n- one | 2 |\n- --- __ é") == 4
+
+
 def test_a_description_over_the_word_limit_states_its_count() -> None:
     spare = pr_format.MAX_WORDS - pr_format.word_count(BODY)
     assert pr_format.check("Add", BODY + "word " * spare, "agent/issue-7", []) == []

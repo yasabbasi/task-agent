@@ -11,13 +11,20 @@ CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#\d+)[ \t]*$", re.M)
 MAX_FILES = 3000
 MAX_WORDS = 250
 HEADINGS = ["Why", "What changed", "Evidence", "Not done", "After merge", "Lessons"]
-SKIPPED = re.compile(r"(^[ \t]*```.*?^[ \t]*```)|<!--.*?-->", re.M | re.S)
+FENCE = r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(```|~~~).*?(?:^[ \t]*\2|\Z)"
+INLINE = r"(?<!`)(`+)(?!`)(?:[^\n]|\n(?!\n))+?(?<!`)\4(?!`)"
+SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->", re.M | re.S)
 SECTION = re.compile(r"^##[ \t]+(.*?)[ \t]*$(.*?)(?=^##[ \t]|\Z)", re.M | re.S)
+
+
+def visible(body: str, fence: str) -> str:
+    """A description with each fenced code block replaced by fence and HTML comments removed."""
+    return SKIPPED.sub(lambda skipped: fence if skipped[1] else skipped[3] or " ", body)
 
 
 def word_count(body: str) -> int:
     """The words in a description, not counting fenced code blocks and HTML comments."""
-    return len(SKIPPED.sub(" ", body).split())
+    return len(re.findall(r"\S*[^\W_]\S*", visible(body, " ")))
 
 
 def protected(path: str) -> bool:
@@ -40,7 +47,7 @@ def check(title: str, body: str, branch: str, files: list[str]) -> list[str]:
         problems.append("the description may close only its own issue, not " + ", ".join(others))
     if CLOSING.search(title):
         problems.append("the title may not close an issue")
-    sections = SECTION.findall(SKIPPED.sub(lambda skipped: "```" if skipped[1] else "", body))
+    sections = SECTION.findall(visible(body, "```"))
     if [name for name, _ in sections] != HEADINGS:
         wanted = ", ".join(f"`## {name}`" for name in HEADINGS)
         problems.append(f"the description needs exactly these headings, in this order: {wanted}")
