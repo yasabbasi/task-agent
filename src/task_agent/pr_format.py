@@ -12,7 +12,7 @@ MAX_FILES = 3000
 MAX_WORDS = 250
 HEADINGS = ["Why", "What changed", "Evidence", "Not done", "After merge", "Lessons"]
 FENCE = r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(```|~~~).*?(?:^[ \t]*\2|\Z)"
-INLINE = r"(?<!`)(`+)(?!`)(?:[^\n]|\n(?!\n))+?(?<!`)\4(?!`)"
+INLINE = r"(?<!`)(`+)(?!`)(?:[^\n]|\n(?!\n|[ \t]*<!--))+?(?<!`)\4(?!`)"
 SKIPPED = re.compile(rf"({FENCE})|({INLINE})|<!--.*?-->", re.M | re.S)
 SECTION = re.compile(r"^##[ \t]+(.*?)[ \t]*$(.*?)(?=^##[ \t]|\Z)", re.M | re.S)
 
