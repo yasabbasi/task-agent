@@ -143,7 +143,13 @@ def claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Pat
     return plan
 
 
-def result(body: str = "## Why\n\nBecause.", **extra: Any) -> dict[str, Any]:
+SECTIONS = (
+    "## Why\n\nBecause.\n\n## What changed\n\nA file.\n\n## Evidence\n\n```\nmake check\n```\n\n"
+    "## Not done\n\nNothing.\n\n## After merge\n\nNothing.\n\n## Lessons\n\nNone\n"
+)
+
+
+def result(body: str = SECTIONS, **extra: Any) -> dict[str, Any]:
     """A successful session result with its two text fields."""
     output = {"pr_title": "Add a file", "pr_body": body}
     base = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 3}

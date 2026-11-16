@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import SECTIONS
 
 from task_agent import cli, dispatch
 from task_agent.app_token import App
@@ -34,7 +35,7 @@ BOT = "yasabbasi-task-agent[bot]"
 def pr_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: list[str], **env: str) -> int:
     listing = tmp_path / "files.txt"
     listing.write_text("\n".join(files) + "\n")
-    values = {"PR_AUTHOR": BOT, "PR_TITLE": "Add a file", "PR_BODY": "Closes #7\n"}
+    values = {"PR_AUTHOR": BOT, "PR_TITLE": "Add a file", "PR_BODY": f"Closes #7\n\n{SECTIONS}"}
     values |= {"PR_BRANCH": "agent/issue-7", "PR_CHANGED_FILES": str(len(files))} | env
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -51,7 +52,8 @@ def test_pr_check_passes_a_clean_app_pull_request(
 def test_pr_check_fails_an_app_pull_request_that_breaks_a_rule(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert pr_check(monkeypatch, tmp_path, ["src/a.py", "Makefile"], PR_BODY="Fixes #8") == 1
+    body = f"Fixes #8\n\n{SECTIONS}"
+    assert pr_check(monkeypatch, tmp_path, ["src/a.py", "Makefile"], PR_BODY=body) == 1
     out = capsys.readouterr().out
     assert "::error::agent pull requests may not change: Makefile" in out
     assert "::error::the description needs exactly one closing line, `Closes #7`" in out
@@ -84,7 +86,8 @@ def test_pr_check_leaves_other_authors_alone(
 def test_pr_check_covers_an_agent_branch_whoever_opened_the_pull_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    assert pr_check(monkeypatch, tmp_path, ["a.py"], PR_AUTHOR="stranger", PR_BODY="Closes #9") == 1
+    body = f"Closes #9\n\n{SECTIONS}"
+    assert pr_check(monkeypatch, tmp_path, ["a.py"], PR_AUTHOR="stranger", PR_BODY=body) == 1
 
 
 def test_verify_request_leaves_a_file_for_the_watcher(

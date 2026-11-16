@@ -9,6 +9,15 @@ ISSUE = r"(?:[\w.-]+/[\w.-]+)?#\d+|GH-\d+|https?://github\.com/\S+/(?:issues|pul
 CLOSING = re.compile(rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*({ISSUE})", re.I)
 CLOSING_LINE = re.compile(r"^(?:Closes|Fixes|Resolves) (#\d+)[ \t]*$", re.M)
 MAX_FILES = 3000
+MAX_WORDS = 250
+HEADINGS = ["Why", "What changed", "Evidence", "Not done", "After merge", "Lessons"]
+SKIPPED = re.compile(r"(^[ \t]*```.*?^[ \t]*```)|<!--.*?-->", re.M | re.S)
+SECTION = re.compile(r"^##[ \t]+(.*?)[ \t]*$(.*?)(?=^##[ \t]|\Z)", re.M | re.S)
+
+
+def word_count(body: str) -> int:
+    """The words in a description, not counting fenced code blocks and HTML comments."""
+    return len(SKIPPED.sub(" ", body).split())
 
 
 def protected(path: str) -> bool:
@@ -31,4 +40,12 @@ def check(title: str, body: str, branch: str, files: list[str]) -> list[str]:
         problems.append("the description may close only its own issue, not " + ", ".join(others))
     if CLOSING.search(title):
         problems.append("the title may not close an issue")
+    sections = SECTION.findall(SKIPPED.sub(lambda skipped: "```" if skipped[1] else "", body))
+    if [name for name, _ in sections] != HEADINGS:
+        wanted = ", ".join(f"`## {name}`" for name in HEADINGS)
+        problems.append(f"the description needs exactly these headings, in this order: {wanted}")
+    if empty := [name for name, text in sections if not text.strip()]:
+        problems.append("the description has empty sections: " + ", ".join(empty))
+    if (words := word_count(body)) > MAX_WORDS:
+        problems.append(f"the description has {words} words; the limit is {MAX_WORDS}")
     return problems

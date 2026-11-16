@@ -1,8 +1,9 @@
 import pytest
+from conftest import SECTIONS
 
 from task_agent import pr_format
 
-BODY = "Closes #7\n\n## Why\n\nBecause.\n"
+BODY = f"Closes #7\n\n{SECTIONS}"
 
 
 @pytest.mark.parametrize(
@@ -103,6 +104,53 @@ def test_prose_about_fixing_things_is_not_a_closing_reference() -> None:
 def test_the_title_may_not_close_an_issue() -> None:
     assert pr_format.check("Add a file, fixes #9", BODY, "agent/issue-7", []) == [
         "the title may not close an issue"
+    ]
+
+
+HEADINGS_PROBLEM = (
+    "the description needs exactly these headings, in this order: `## Why`, `## What changed`, "
+    "`## Evidence`, `## Not done`, `## After merge`, `## Lessons`"
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        BODY.replace("## Not done\n\nNothing.\n\n", ""),
+        BODY.replace("## Why\n\nBecause.\n\n", "") + "\n## Why\n\nBecause.\n",
+        BODY + "\n## Notes\n\nMore.\n",
+    ],
+)
+def test_the_description_needs_the_template_headings_in_order(body: str) -> None:
+    assert pr_format.check("Add", body, "agent/issue-7", []) == [HEADINGS_PROBLEM]
+
+
+def test_empty_sections_are_named() -> None:
+    body = BODY.replace("Because.", "").replace("None", "<!-- Each rule: line is filed. -->")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == [
+        "the description has empty sections: Why, Lessons"
+    ]
+
+
+def test_a_section_holding_only_a_code_block_is_filled() -> None:
+    assert "## Evidence\n\n```\nmake check\n```\n\n## Not done" in BODY
+    assert pr_format.check("Add", BODY, "agent/issue-7", []) == []
+
+
+def test_a_heading_inside_a_code_block_is_not_a_section() -> None:
+    body = BODY.replace("make check", "## Why\n\n## Output")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+
+
+def test_word_count_skips_code_blocks_and_comments() -> None:
+    assert pr_format.word_count("one two\n\n```sh\nmake check\n```\n<!-- a\nnote -->three") == 3
+
+
+def test_a_description_over_the_word_limit_states_its_count() -> None:
+    spare = pr_format.MAX_WORDS - pr_format.word_count(BODY)
+    assert pr_format.check("Add", BODY + "word " * spare, "agent/issue-7", []) == []
+    assert pr_format.check("Add", BODY + "word " * (spare + 1), "agent/issue-7", []) == [
+        "the description has 251 words; the limit is 250"
     ]
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import BOT, CFG, FakeApi, FakeApp, approval, result, run_git
+from conftest import BOT, CFG, SECTIONS, FakeApi, FakeApp, approval, result, run_git
 
 from task_agent import config, dispatch
 
@@ -259,7 +259,7 @@ def test_a_description_that_closes_another_issue_is_blocked_with_a_link_to_the_b
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
-    claude({"files": {"a.txt": "x\n"}, "output": [result(body="## Why\n\nAlso fixes #99.")]})
+    claude({"files": {"a.txt": "x\n"}, "output": [result(body=SECTIONS + "Also fixes #99.")]})
     api = ready_api()
     line = dispatch.work(FakeApp(api), cfg, issue(7))
     assert line.startswith("#7: blocked (the work is on https://github.com/owner/repo/tree/agent/")
