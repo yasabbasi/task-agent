@@ -41,6 +41,7 @@ The watcher holds the key, so anything that needs the key can be asked of it wit
 |---|---|
 | `wake` | Start the next pass now instead of waiting. |
 | `verify-<repo name>` | Run `make verify` for that repo. The file may hold a pull request number to try merging. |
+| `metrics` | After the pass, open a pull request that refreshes the metrics table in `README.md`, as `make metrics PUBLISH=1` does. |
 
 A new file there ends the wait early. `make verify REPO=owner/name REQUEST=1` writes the verify
 request, and so does `uv run task-agent verify --repo owner/name --request`. Run either one

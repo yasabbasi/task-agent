@@ -9,7 +9,7 @@ from pathlib import Path
 
 from task_agent import close_out, config, dispatch, init, pr_format, readiness, verify, watch
 from task_agent.app_token import App, read_key
-from task_agent.metrics import report
+from task_agent.metrics import publish, report, requested
 
 ROOT = config.ROOT
 
@@ -67,11 +67,12 @@ def cmd_dispatch_all(args: argparse.Namespace) -> int:
     app, base, _ = loaded(args)
     targets = [base.target(repo) for repo in base.repos]
     dispatch.run_pass(app, base, targets, each=lambda cfg, out: verify.requested(app, cfg, out))
+    requested(app, base, dispatch.say)
     return 0
 
 
 def cmd_metrics(args: argparse.Namespace) -> int:
-    print(report(*loaded(args)[:2]))
+    print((publish if args.publish else report)(*loaded(args)[:2]))
     return 0
 
 
@@ -126,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     one.add_argument("--dry-run", action="store_true", help="list what would be taken")
     every = command("dispatch-all", cmd_dispatch_all, "run one pass over every configured repo")
     stats = command("metrics", cmd_metrics, "print the loop's numbers for every configured repo")
+    stats.add_argument("--publish", action="store_true", help="open a pull request with them")
     for parsed in (every, stats):
         parsed.add_argument("--key-stdin", action="store_true", help="read the App key from stdin")
     loop = command("watch", cmd_watch, "keep running passes; asks for Touch ID once")
