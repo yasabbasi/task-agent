@@ -5,6 +5,7 @@ import re
 import subprocess
 import tempfile
 import textwrap
+import unicodedata
 from pathlib import Path
 
 from task_agent import config
@@ -89,6 +90,8 @@ def propose(target: Config, changed: dict[str, str]) -> str:
         git(target.clone, "worktree", "add", "--quiet", "-B", BRANCH, str(tree), "origin/main")
         try:
             for path, text in changed.items():
+                if any((tree / up).is_symlink() for up in (Path(path), *Path(path).parents)):
+                    raise SystemExit(f"{path}: it or a folder above it is a worktree symlink")
                 (tree / path).parent.mkdir(parents=True, exist_ok=True)
                 (tree / path).write_text(text)
             git(tree, "add", "--", *changed)
@@ -123,17 +126,20 @@ def steps(base: Config, target: Config) -> None:
     repo = target.repo
     if repo.lower() == base.repo.lower():
         raise SystemExit(f"{repo} is task-agent itself; its workflows are written by hand")
-    urls = [("remote", "get-url", "origin"), ("remote", "get-url", "--push", "origin")]
-    found = [git(target.clone, *url, check=False).strip() for url in urls * target.clone.is_dir()]
-    wanted = re.compile(ORIGIN.format(re.escape(repo)), re.IGNORECASE)
+    urls = [("get-url", "--all", "origin"), ("get-url", "--push", "--all", "origin")]
+    lists = [git(target.clone, "remote", *url, check=False) for url in urls * target.clone.is_dir()]
+    found = [url for text in lists for url in text.split()]
+    wanted = re.compile(ORIGIN.format(re.escape(repo)), re.IGNORECASE | re.ASCII)
     if not found or not all(wanted.fullmatch(url) for url in found):
         raise SystemExit(f"origin of {target.clone} is not {repo} on github.com")
     sha, tag = pin(base.root)
     git(target.clone, "fetch", "--quiet", "origin", "main")
     files = managed(base, target, sha, tag)
-    above = {str(up).lower() for path in files for up in (Path(path), *Path(path).parents)}
+    ways = {str(up) for path in files for up in (Path(path), *Path(path).parents)}
+    above = {unicodedata.normalize("NFD", way).casefold() for way in ways}
     listed = git(target.clone, "ls-tree", "-r", "-t", "-z", "origin/main").split("\0")
-    if any(e.startswith("120000") and e.partition("\t")[2].lower() in above for e in listed):
+    links = [e.partition("\t")[2] for e in listed if e.startswith("120000")]
+    if any(unicodedata.normalize("NFD", link).casefold() in above for link in links):
         raise SystemExit(f"{repo}: a managed path or a folder above it is a symlink on main")
     settings(repo, show(base.root, ".github/labels.json", sha))
     changed = {p: text for p, text in files.items() if show(target.clone, p, check=False) != text}
