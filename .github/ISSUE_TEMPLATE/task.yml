@@ -1,0 +1,56 @@
+name: Task
+description: Ask an agent to make one change.
+labels: ["status:triage"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: The change you want and why, in a sentence or two.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Outcomes a test or a command can show, one checklist item per line.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: start
+    attributes:
+      label: Starting point
+      description: Existing files or folders to start from, each in backticks, such as `src/`.
+    validations:
+      required: true
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      description: >-
+        Optional. Issues that must be closed as completed before an agent starts this one,
+        such as `#12` or `owner/repo#3`.
+    validations:
+      required: false
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options: [feature, bug, docs, chore]
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: [p1, p2, p3]
+    validations:
+      required: true
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Effort
+      options: [s, m, l]
+    validations:
+      required: true

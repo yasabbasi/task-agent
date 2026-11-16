@@ -60,3 +60,13 @@ def test_readme_only_names_make_targets_that_exist() -> None:
     targets = set(re.findall(r"^([a-z-]+):", (ROOT / "Makefile").read_text(), flags=re.M))
     named = set(re.findall(r"`make ([a-z-]+)", (ROOT / "README.md").read_text()))
     assert named and named <= targets
+
+
+def test_task_skill_and_form_use_the_headings_the_parser_reads() -> None:
+    from task_agent import readiness
+
+    skill = (ROOT / ".claude" / "skills" / "task" / "SKILL.md").read_text()
+    form = (ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml").read_text()
+    assert re.match(r"---\nname: task\ndescription: \S.*\n---\n", skill)
+    assert re.findall(r"^   ### (.+)$", skill, flags=re.M) == list(readiness.HEADINGS)
+    assert re.findall(r"^      label: (.+)$", form, flags=re.M) == list(readiness.HEADINGS)

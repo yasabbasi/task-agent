@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install check lint test format loc
+.PHONY: help install check lint test format loc install-skill
 
 LOC_FILES ?= src/task_agent/*.py
 LOC_MAX ?= 1500
@@ -33,3 +33,7 @@ loc: ## Count the lines in src/ against the cap
 	@total=$$(cat $(LOC_FILES) | wc -l | tr -d ' '); \
 	echo "$$total lines in $(LOC_FILES) (cap $(LOC_MAX))"; \
 	test $$total -le $(LOC_MAX)
+
+install-skill: ## Link /task into ~/.claude/skills so it works in any repo
+	mkdir -p ~/.claude/skills
+	ln -sfn $(CURDIR)/.claude/skills/task ~/.claude/skills/task
