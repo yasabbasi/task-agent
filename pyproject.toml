@@ -1,0 +1,47 @@
+[project]
+name = "task-agent"
+version = "0.1.0"
+description = "Turn a request typed into Claude into a reviewed, merged pull request."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "yas", email = "355981534+yasabbasi@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+task-agent = "task_agent.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy==2.4.1",
+    "pymarkdownlnt==0.9.42",
+    "pytest==9.2.0",
+    "ruff==0.17.5",
+    "yamllint==1.38.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.pymarkdown]
+plugins.line-length.enabled = false
+plugins.first-line-heading.enabled = false
+extensions.front-matter.enabled = true

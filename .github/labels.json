@@ -1,0 +1,92 @@
+[
+  {
+    "name": "status:triage",
+    "color": "d4c5f9",
+    "description": "New request, not yet reviewed"
+  },
+  {
+    "name": "status:ready",
+    "color": "0e8a16",
+    "description": "Approved by the owner for an agent to take"
+  },
+  {
+    "name": "status:claimed",
+    "color": "fbca04",
+    "description": "An agent is working on it"
+  },
+  {
+    "name": "status:review",
+    "color": "1d76db",
+    "description": "Pull request open, waiting for review"
+  },
+  {
+    "name": "status:blocked",
+    "color": "b60205",
+    "description": "Agent run failed or was refused; see the comment"
+  },
+  {
+    "name": "type:feature",
+    "color": "a2eeef",
+    "description": "New capability"
+  },
+  {
+    "name": "type:bug",
+    "color": "d73a4a",
+    "description": "Something is broken"
+  },
+  {
+    "name": "type:docs",
+    "color": "0075ca",
+    "description": "Documentation only"
+  },
+  {
+    "name": "type:chore",
+    "color": "cfd3d7",
+    "description": "Maintenance"
+  },
+  {
+    "name": "priority:p1",
+    "color": "b60205",
+    "description": "Do next"
+  },
+  {
+    "name": "priority:p2",
+    "color": "d93f0b",
+    "description": "Do soon"
+  },
+  {
+    "name": "priority:p3",
+    "color": "fef2c0",
+    "description": "Do when convenient"
+  },
+  {
+    "name": "effort:s",
+    "color": "c2e0c6",
+    "description": "Under an hour of agent work"
+  },
+  {
+    "name": "effort:m",
+    "color": "bfdadc",
+    "description": "A few hours"
+  },
+  {
+    "name": "effort:l",
+    "color": "bfd4f2",
+    "description": "Should probably be split"
+  },
+  {
+    "name": "human-authored",
+    "color": "5319e7",
+    "description": "Done by the owner, not an agent; left out of the metrics"
+  },
+  {
+    "name": "lesson",
+    "color": "c5def5",
+    "description": "Filed from a rule: line in a pull request"
+  },
+  {
+    "name": "metrics",
+    "color": "ededed",
+    "description": "Metrics refresh; left out of the metrics"
+  }
+]
