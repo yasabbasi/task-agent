@@ -259,6 +259,11 @@ def test_init_stops_before_changing_anything_at_the_wrong_target(
         ("https://github.com.example.com/owner/repo", ""),
         ("git@example.com:owner/repo.git", ""),
         ("https://github.com/owner/repo.git", "https://example.com/owner/repo.git"),
+        ("https://gıthub.com/owner/repo", ""),
+        (
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo.git https://example.com/owner/repo.git",
+        ),
     ],
 )
 def test_init_stops_when_origin_fetches_or_pushes_on_another_host(
@@ -266,15 +271,24 @@ def test_init_stops_when_origin_fetches_or_pushes_on_another_host(
 ) -> None:
     calls = gh()
     run_git(cfg.clone, "remote", "set-url", "origin", fetch)
-    if push:
-        run_git(cfg.clone, "remote", "set-url", "--push", "origin", push)
+    for url in push.split():
+        run_git(cfg.clone, "remote", "set-url", "--add", "--push", "origin", url)
     with pytest.raises(SystemExit, match="is not owner/repo on github.com"):
         init.run(base, cfg)
     assert calls() == []
 
 
 @pytest.mark.parametrize(
-    "link", [".github", ".GitHub", ".github/workflows", ".github/Workflows", ".github/CODEOWNERS"]
+    "link",
+    [
+        ".github",
+        ".GitHub",
+        ".github/workflows",
+        ".github/Workflows",
+        ".github/CODEOWNERS",
+        ".github/workflowſ",
+        ".github/CODEOWNERſ",
+    ],
 )
 def test_init_stops_at_a_symlink_on_the_way_to_a_managed_path(
     gh: Gh, base: config.Config, cfg: config.Config, link: str
@@ -288,6 +302,21 @@ def test_init_stops_at_a_symlink_on_the_way_to_a_managed_path(
     with pytest.raises(SystemExit, match="is a symlink on main"):
         init.run(base, cfg)
     assert calls() == []
+
+
+def test_nothing_is_written_through_a_symlink_in_the_worktree(
+    gh: Gh, cfg: config.Config, tmp_path: Path
+) -> None:
+    gh()
+    (tmp_path / "outside").mkdir()
+    (cfg.clone / ".github").symlink_to(tmp_path / "outside")
+    run_git(cfg.clone, "add", "-A")
+    run_git(cfg.clone, "commit", "--quiet", "-m", "link")
+    run_git(cfg.clone, "push", "--quiet", "origin", "main")
+    with pytest.raises(SystemExit, match="is a worktree symlink"):
+        init.propose(cfg, {".github/CODEOWNERS": "* @owner\n"})
+    assert list((tmp_path / "outside").iterdir()) == []
+    assert run_git(cfg.clone, "worktree", "list").count("\n") == 1
 
 
 def test_an_unrelated_symlink_inside_github_is_accepted(
@@ -427,8 +456,8 @@ def test_an_up_to_date_repo_gets_the_ruleset(
     assert sum(made[0][:2] == ["pr", "create"] for made in calls()) == 1
 
 
-def test_init_module_stays_within_165_lines() -> None:
-    assert len((ROOT / "src/task_agent/init.py").read_text().splitlines()) <= 165
+def test_init_module_stays_within_160_lines() -> None:
+    assert len((ROOT / "src/task_agent/init.py").read_text().splitlines()) <= 160
 
 
 def test_init_command_aims_main_s_settings_at_the_repo_and_clone(
