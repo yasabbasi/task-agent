@@ -9,6 +9,7 @@ from pathlib import Path
 
 from task_agent import close_out, config, dispatch, init, pr_format, readiness, verify, watch
 from task_agent.app_token import App, read_key
+from task_agent.metrics import report
 
 ROOT = config.ROOT
 
@@ -69,6 +70,11 @@ def cmd_dispatch_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    print(report(*loaded(args)[:2]))
+    return 0
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     try:
         watch.watch(args.every, args.key_fd)
@@ -119,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     one = command("dispatch", cmd_dispatch, "run one pass over one repo")
     one.add_argument("--dry-run", action="store_true", help="list what would be taken")
     every = command("dispatch-all", cmd_dispatch_all, "run one pass over every configured repo")
-    every.add_argument("--key-stdin", action="store_true", help="read the App key from stdin")
+    stats = command("metrics", cmd_metrics, "print the loop's numbers for every configured repo")
+    for parsed in (every, stats):
+        parsed.add_argument("--key-stdin", action="store_true", help="read the App key from stdin")
     loop = command("watch", cmd_watch, "keep running passes; asks for Touch ID once")
     loop.add_argument("--every", type=int, default=600, help="seconds between passes")
     loop.add_argument("--key-fd", type=int, help=argparse.SUPPRESS)
