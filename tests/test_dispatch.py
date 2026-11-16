@@ -312,9 +312,9 @@ def test_a_follow_up_that_rewrites_the_git_file_gets_nothing_pushed(
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
-    claude(
+    calls = claude(
         {"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]},
-        {"files": {".git": "gitdir: /elsewhere\n"}, "output": [result()]},
+        {"files": {".git": "gitdir: /elsewhere\n"}, "output": [result(body=BAD)]},
     )
     api = ready_api()
     line = dispatch.work(FakeApp(api), cfg, issue(7))
@@ -322,6 +322,71 @@ def test_a_follow_up_that_rewrites_the_git_file_gets_nothing_pushed(
     assert "run cost=0.85 turns=6 secs=123 -->" in api.posted("/issues/7/comments")[0]["body"]
     assert "agent/issue-7" not in run_git(github, "branch", "--list")
     assert not api.posted("/pulls")
+    assert len(json.loads(calls.read_text())) == 2
+
+
+@pytest.mark.parametrize("name", [".venv", ".claude/settings.local.json"])
+def test_a_refused_file_left_by_a_session_starts_no_follow_up_and_pushes_nothing(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    ignored = {f"{name.split('/')[0]}/.gitignore": "*\n", f"{name}/x": "{}"}
+    calls = claude({"files": {"a.txt": "x\n"} | ignored, "output": [result(body=BAD)]})
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line == f"#7: blocked (refused a follow-up: the checkout contains {name})"
+    assert "agent/issue-7" not in run_git(github, "branch", "--list")
+    assert len(json.loads(calls.read_text())) == 1
+
+
+def test_the_venv_that_prepare_made_does_not_stop_a_follow_up(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    (cfg.clone / "uv.lock").write_text("")
+    run_git(cfg.clone, "add", "uv.lock")
+    run_git(cfg.clone, "commit", "--quiet", "-m", "lock")
+    run_git(cfg.clone, "push", "--quiet", str(github), "HEAD:main")
+    real = subprocess.run
+
+    def sync(cmd: list[str], **kwargs: Any) -> Any:
+        if cmd[0] != "uv":
+            return real(cmd, **kwargs)
+        (kwargs["cwd"] / ".venv").mkdir()
+        (kwargs["cwd"] / ".venv" / ".gitignore").write_text("*\n")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", sync)
+    claude({"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]}, {"output": [result()]})
+    api = ready_api()
+    assert dispatch.work(FakeApp(api), cfg, issue(7)) == "#7: opened https://example/pull/1"
+
+
+@pytest.mark.parametrize("error", [dispatch.Blocked("timed out after 5 minutes"), OSError("boom")])
+def test_a_follow_up_that_fails_adds_its_seconds_and_the_work_is_still_pushed(
+    cfg: config.Config,
+    github: Path,
+    claude: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    clock, seen, real = iter(range(0, 100, 7)), list[str](), dispatch.session
+
+    def failing(cmd: list[str], cfg: config.Config, worktree: Path) -> tuple[str, str, int]:
+        seen.append(cmd[2])
+        if len(seen) > 1:
+            raise error
+        return real(cmd, cfg, worktree)
+
+    monkeypatch.setattr(dispatch, "session", failing)
+    monkeypatch.setattr("time.monotonic", lambda: next(clock))
+    claude({"files": {"a.txt": "x\n"}, "output": [result(body=BAD)]})
+    api = ready_api()
+    line = dispatch.work(FakeApp(api), cfg, issue(7))
+    assert line.startswith("#7: blocked (the work is on https://github.com/owner/repo/tree/agent/")
+    assert "run cost=0.42 turns=3 secs=75 -->" in api.posted("/issues/7/comments")[0]["body"]
+    assert "agent/issue-7" in run_git(github, "branch", "--list") and len(seen) == 3
 
 
 @pytest.mark.parametrize(("name", "title"), [("CLAUDE.md", "Add a file"), ("a.txt", "Fix #3 now")])

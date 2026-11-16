@@ -346,18 +346,29 @@ def commit(cfg: Config, worktree: Path, api: Api, title: str, result: Json) -> l
     return [name for name in names.split("\0") if name]
 
 
+def recheck(cfg: Config, worktree: Path, gitfile: str, result: Json) -> None:
+    """Before a follow-up session: block if the .git file changed or a refused file appeared."""
+    if (worktree / ".git").read_text() != gitfile:
+        raise Blocked("the worktree's .git file was changed", result)
+    made = ".venv" if git(cfg.clone, "ls-tree", "origin/main", "uv.lock") else ""
+    for name in REFUSE:
+        if name != made and (worktree / name).exists():
+            raise Blocked(f"refused a follow-up: the checkout contains {name}", result)
+
+
 def repair(cfg: Config, worktree: Path, number: int, text: str, problems: str, result: Json) -> str:
     """A short follow-up session rewrites a failing description; its cost is added to result."""
     words = pr_format.word_count(pr_body(text, number, result))
-    values = {"problems": problems, "words": str(words), "body": text}
+    values, began = {"problems": problems, "words": str(words), "body": text}, time.monotonic()
     try:
         short = replace(cfg, max_turns=5, budget_usd=0.5, timeout_min=5)
         more = run_agent(short, worktree, number, render(REPAIR, values))
         text = more["structured_output"]["pr_body"]
-    except Blocked as exc:
-        if CANCEL.is_set():
+    except Exception as exc:  # any failure repaired nothing; the work is still pushed
+        if CANCEL.wait(1 if isinstance(exc, subprocess.SubprocessError) else 0):
             raise
-        more = exc.result
+        more = getattr(exc, "result", None) or {}
+    more = {**more, "duration_ms": more.get("duration_ms") or (time.monotonic() - began) * 1000}
     for key in ("total_cost_usd", "num_turns", "duration_ms"):
         result[key] = (result.get(key) or 0) + (more.get(key) or 0)
     return text
@@ -377,6 +388,7 @@ def publish(app: App, cfg: Config, worktree: Path, gitfile: str, number: int, re
         problems = "\n".join(f"- {p}" for p in found)
         if not (left and found and all(p.startswith("the description") for p in found)):
             break
+        recheck(cfg, worktree, gitfile, result)
         text = repair(cfg, worktree, number, text, problems, result)
     if any(pr_format.protected(path) for path in files):
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)
