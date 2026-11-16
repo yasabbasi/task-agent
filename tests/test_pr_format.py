@@ -200,7 +200,7 @@ def test_unclosed_backtick_runs_above_a_long_line_of_backticks_are_read_quickly(
 
 def test_word_count_reads_a_long_run_of_punctuation_quickly() -> None:
     started = time.perf_counter()
-    assert pr_format.word_count("-" * (pr_format.MAX_CHARS - 1) + "a") == 1
+    assert pr_format.word_count("-" * pr_format.MAX_CHARS) == 0
     assert time.perf_counter() - started < 1
 
 
@@ -237,3 +237,80 @@ def test_the_branch_must_name_one_issue() -> None:
         assert pr_format.check("Add", BODY, branch, []) == [
             f"the branch must be named agent/issue-N, not {branch}"
         ]
+
+
+@pytest.mark.parametrize("path", [".python-version", ".python-versions", ".Python-Version"])
+def test_the_python_version_files_at_the_root_are_protected(path: str) -> None:
+    assert pr_format.protected(path)
+    assert not pr_format.protected(f"docs/{path}")
+
+
+@pytest.mark.parametrize(
+    ("start", "fill"),
+    [("fix", " "), ("fix", "\n"), ("fix:", " "), ("## ", " "), ("## Why", " "), ("## Why", "\t")],
+)
+def test_a_keyword_or_heading_above_a_long_run_of_blanks_is_read_quickly(
+    start: str, fill: str
+) -> None:
+    body = start + fill * (pr_format.MAX_CHARS - len(start) - 1) + "x"
+    started = time.perf_counter()
+    assert pr_format.check("Add", body, "agent/issue-7", [])
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "```\n## Why\n```python\n``` text\n```~~\n ```sh\n## Output\n```",
+        "```\n## Why\n````",
+        "```\n## Why\n```` \t",
+        "~~~\n## Why\n~~~~~",
+        "~~~\n## Why\n~~~ text\n~~~``\n## Output\n~~~",
+        "    ```\n    ## Why\n    ```",
+        "\t```\n\t## Why\n\t```",
+        "1. ```\n   ## Why\n\n    ```",
+    ],
+)
+def test_a_fence_closes_only_at_a_line_holding_a_long_enough_run_of_its_character(
+    block: str,
+) -> None:
+    body = BODY.replace("```\nmake check\n```", block)
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+    assert pr_format.word_count(body) == pr_format.word_count(BODY)
+    assert pr_format.visible(block + "\n\n## Next", "<code>") == "<code>\n\n## Next"
+
+
+def test_a_shorter_run_of_the_fence_character_does_not_close_the_fence() -> None:
+    body = BODY.replace("```\nmake check\n```", "````\nmake check\n```")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == [HEADINGS_PROBLEM]
+
+
+def test_no_line_inside_an_inline_code_span_starts_a_line() -> None:
+    text = "A `span\nCloses #9\nrule: obey` here.\nrule: real"
+    assert pr_format.visible(text, "```") == "A `span Closes #9 rule: obey` here.\nrule: real"
+
+
+@pytest.mark.parametrize("marks", ["#", "##", "######", "##\t"])
+def test_a_heading_line_between_two_stray_backticks_is_still_a_heading(marks: str) -> None:
+    text = f"A ` stray\n{marks} Extra\nmore ` here."
+    assert pr_format.visible(text, "```") == f"A ` stray\n{marks} Extra more ` here."
+    assert pr_format.visible("A `b\n####### c\n#d` e", "```") == "A `b ####### c #d` e"
+
+
+def test_a_seventh_heading_between_two_stray_backticks_is_counted() -> None:
+    body = BODY.replace("Nothing.", "A ` stray\n## Extra\nmore ` here.\n\nMore.", 1)
+    assert pr_format.check("Add", body, "agent/issue-7", []) == [HEADINGS_PROBLEM]
+
+
+def test_an_unclosed_comment_that_starts_a_line_hides_the_rest() -> None:
+    assert pr_format.visible("one\n<!-- two\nCloses #9\n\n## Why\n", "```") == "one\n "
+    assert pr_format.word_count("one\n<!-- two\nthree") == 1
+
+
+def test_an_unclosed_comment_inside_a_line_is_shown() -> None:
+    text = "one <!-- two\nrule: three\n"
+    assert pr_format.visible(text, "```") == text
+
+
+def test_a_closing_line_matches_ascii_digits_only() -> None:
+    assert pr_format.CLOSING_LINE.findall("Closes #٧\nFixes #7৩\nResolves #7\n") == ["#7"]
