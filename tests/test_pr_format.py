@@ -293,7 +293,7 @@ def test_no_line_inside_an_inline_code_span_starts_a_line() -> None:
 @pytest.mark.parametrize("marks", ["#", "##", "######", "##\t"])
 def test_a_heading_line_between_two_stray_backticks_is_still_a_heading(marks: str) -> None:
     text = f"A ` stray\n{marks} Extra\nmore ` here."
-    assert pr_format.visible(text, "```") == f"A ` stray\n{marks} Extra more ` here."
+    assert pr_format.visible(text, "```") == f"A ` stray\n{marks} Extra\nmore ` here."
     assert pr_format.visible("A `b\n####### c\n#d` e", "```") == "A `b ####### c #d` e"
 
 
@@ -314,3 +314,42 @@ def test_an_unclosed_comment_inside_a_line_is_shown() -> None:
 
 def test_a_closing_line_matches_ascii_digits_only() -> None:
     assert pr_format.CLOSING_LINE.findall("Closes #٧\nFixes #7৩\nResolves #7\n") == ["#7"]
+
+
+def test_a_heading_inside_an_inline_code_span_keeps_the_line_break_that_ends_it() -> None:
+    text = "A `b\n## Lessons\nrule: x\nd` e"
+    assert pr_format.visible(text, "```") == "A `b\n## Lessons\nrule: x d` e"
+    assert pr_format.visible("A `b\n# c\n## d\ne\nf` g", "```") == "A `b\n# c\n## d\ne f` g"
+
+
+def test_six_headings_without_blank_lines_between_two_stray_backticks_pass() -> None:
+    texts = ["Because ` x.", "A file.", "Ran it.", "Nothing ` y.", "Nothing.", "None"]
+    pairs = zip(pr_format.HEADINGS, texts, strict=True)
+    body = "Closes #7\n" + "".join(f"## {name}\n{text}\n" for name, text in pairs)
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+
+
+@pytest.mark.parametrize("indent", [" ", "  ", "   "])
+def test_an_unclosed_comment_indented_up_to_three_spaces_hides_the_rest(indent: str) -> None:
+    assert pr_format.visible(f"one\n{indent}<!-- two\n\n## Why\n", "```") == "one\n "
+    shown = "one\n    <!-- two\n\n## Why\n"
+    assert pr_format.visible(shown, "```") == shown
+
+
+def test_a_closing_keyword_before_the_longest_owner_and_repo_names_is_found() -> None:
+    ref = f"{'o' * 39}/{'r' * 100}#9"
+    assert pr_format.CLOSING.findall(f"fixes {ref}") == [ref]
+
+
+@pytest.mark.parametrize("comment", ["<!-->", "<!--->"])
+def test_a_line_holding_only_an_abruptly_closed_comment_hides_nothing_after_it(
+    comment: str,
+) -> None:
+    text = f"one\n{comment}\n## Why\ntwo -->\n"
+    assert pr_format.visible(text, "```") == "one\n \n## Why\ntwo -->\n"
+
+
+def test_a_long_run_of_a_closing_keyword_and_a_hyphen_is_read_quickly() -> None:
+    started = time.perf_counter()
+    assert pr_format.check("Add", "fix-" * 16384, "agent/issue-7", [])
+    assert time.perf_counter() - started < 0.5

@@ -277,3 +277,21 @@ def test_gh_is_called_without_a_shell(monkeypatch: pytest.MonkeyPatch, tmp_path:
     (create,) = [argv for argv, _ in ran if argv[1:3] == ["issue", "create"]]
     assert create[5:7] == ["--title", "$(x); y"]
     assert ran[-1][1]["input"] == f"$(x); y\n\n{URL}"
+
+
+def test_a_rule_that_equals_an_open_issue_title_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch)
+    gh.issues.append({"title": "use `uv run`", "body": f"use `uv run` everywhere\n\n{URL}"})
+    close_out.run_event(write_event(tmp_path), BOT)
+    assert titles_filed(gh) == [LONG[:72].strip()]
+
+
+def test_only_issues_labeled_lesson_are_listed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gh = fake(monkeypatch)
+    close_out.run_event(write_event(tmp_path), BOT)
+    ((args, _),) = gh.made("issue", "list")
+    assert args[args.index("--label") + 1] == "lesson"
