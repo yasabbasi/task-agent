@@ -60,6 +60,19 @@ def test_parse_body_keeps_the_depends_on_text() -> None:
     assert readiness.parse_body(body)["depends"] == "#12\nowner/repo#3"
 
 
+def test_depends_on_reads_issues_in_this_repo_and_in_others() -> None:
+    fields = readiness.parse_body(BODY.replace("_No response_", "#12, owner/other#3\n- #12"))
+    assert readiness.depends_on(fields, "o/r") == [("o/r", 12), ("owner/other", 3)]
+    assert readiness.depends_on(readiness.parse_body(BODY), "o/r") == []
+
+
+def test_the_comment_gains_a_pass_line_naming_the_dependencies() -> None:
+    body = BODY.replace("_No response_", "#12\nowner/other#3")
+    results = readiness.check(readiness.parse_body(body), always)
+    assert "- pass: Depends on #12, owner/other#3, and waits" in readiness.comment(results)
+    assert len(readiness.check(readiness.parse_body(BODY), always)) == len(results) - 1
+
+
 def test_a_complete_issue_passes_every_check() -> None:
     assert all(ok for ok, _ in readiness.check(readiness.parse_body(BODY), always))
 
