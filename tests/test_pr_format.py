@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from conftest import SECTIONS
 
@@ -158,12 +160,59 @@ def test_a_comment_start_in_inline_code_does_not_open_a_comment() -> None:
         "~~~\n## Why\n\n## Output\n~~~",
         "- ```\n  ## Why\n\n  ## Output\n  ```",
         "1. ~~~sh\n## Why\n~~~",
+        "~~~~\n## Why\n~~~\n## Output\n~~~~",
+        "````\n## Why\n```\n## Output\n````",
     ],
 )
 def test_tilde_fences_and_fences_in_list_items_are_code_blocks(block: str) -> None:
     body = BODY.replace("```\nmake check\n```", block)
     assert pr_format.check("Add", body, "agent/issue-7", []) == []
     assert pr_format.word_count(body) == pr_format.word_count(BODY)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("```\nmake check", "Run ` this:\n```\nmake `check`"),
+        ("Nothing.", "A stray ` here.\n<!-- a `b`\n\n## Lessons -->"),
+    ],
+)
+def test_a_stray_backtick_above_a_fence_or_comment_leaves_the_headings_intact(
+    old: str, new: str
+) -> None:
+    assert pr_format.check("Add", BODY.replace(old, new, 1), "agent/issue-7", []) == []
+
+
+@pytest.mark.parametrize("start", ["", "- ", "1. "])
+def test_a_line_that_starts_with_a_triple_backtick_span_is_not_a_fence(start: str) -> None:
+    body = BODY.replace("Because.", f"{start}```make``` runs `ruff`.")
+    assert pr_format.check("Add", body, "agent/issue-7", []) == []
+
+
+@pytest.mark.parametrize("end", ["", " `"])
+def test_unclosed_backtick_runs_above_a_long_line_of_backticks_are_read_quickly(end: str) -> None:
+    runs = " ".join("`" * length for length in range(1, 256)) + "\n"
+    body = runs + "`" * (pr_format.MAX_CHARS - len(runs) - len(end)) + end
+    started = time.perf_counter()
+    assert pr_format.check("Add", body, "agent/issue-7", [])
+    assert time.perf_counter() - started < 1
+
+
+def test_word_count_reads_a_long_run_of_punctuation_quickly() -> None:
+    started = time.perf_counter()
+    assert pr_format.word_count("-" * (pr_format.MAX_CHARS - 1) + "a") == 1
+    assert time.perf_counter() - started < 1
+
+
+def test_a_description_over_the_character_limit_gets_one_problem_and_is_not_parsed() -> None:
+    body = "fixes #99 `" * 6000
+    assert pr_format.check("Add, fixes #9", body, "agent/issue-7", ["uv.lock"]) == [
+        "agent pull requests may not change: uv.lock",
+        "the title may not close an issue",
+        "the description has 66000 characters; the limit is 65536",
+    ]
+    assert pr_format.visible(body, "```") == ""
+    assert pr_format.word_count(body) == 0
 
 
 def test_an_unterminated_fence_hides_the_headings_after_it() -> None:
