@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from conftest import BOT, CFG, SECTIONS, FakeApi, FakeApp
 
-from task_agent import cli, config, dispatch, metrics, pr_format
+from task_agent import cli, config, dispatch, metrics, pr_format, verify
 
 RUN = "<!-- task-agent:run cost={cost} turns=3 secs=61 -->"
 BASE = replace(CFG, repos={"owner/repo": "."})
@@ -21,9 +21,10 @@ TABLE = (
 class Hub(FakeApi):
     """A repo whose listings are empty and whose README on main holds the text given."""
 
-    def __init__(self, readme: str) -> None:
+    def __init__(self, readme: str, fails: str = "") -> None:
         super().__init__()
-        self.readme = readme
+        self.readme, self.fails, self.branch = readme, fails, False
+        self.open = list[dict[str, Any]]()
 
     def __call__(self, method: str, path: str, body: Any = None) -> Any:
         self.calls.append((method, path, body))
@@ -31,7 +32,21 @@ class Hub(FakeApi):
             return {"object": {"sha": "abc"}}
         if path == "/contents/README.md?ref=abc":
             return {"content": encodebytes(self.readme.encode()).decode(), "sha": "blob"}
+        if path == "/issues?state=open&labels=metrics":
+            return self.open
+        if (method != "GET" and path == self.fails) or (method == "DELETE" and not self.branch):
+            raise RuntimeError("boom\nat line 2")
+        self.branch = self.branch or path == "/git/refs"
         return [] if method == "GET" else {"number": 7, "html_url": "https://example/pull/8"}
+
+
+class Flaky(FakeApp):
+    """An App that is not installed on owner/down."""
+
+    def token(self, repo: str, **permissions: str) -> FakeApi:
+        if repo == "owner/down":
+            raise RuntimeError("no installation")
+        return super().token(repo, **permissions)
 
 
 def issue(number: int, *labels: str, state: str = "closed") -> dict[str, Any]:
@@ -143,12 +158,6 @@ def test_pages_follows_pages_of_100_until_a_short_one() -> None:
 
 
 def test_a_repo_whose_calls_fail_gets_a_row_of_n_a_and_a_line() -> None:
-    class Flaky(FakeApp):
-        def token(self, repo: str, **permissions: str) -> FakeApi:
-            if repo == "owner/down":
-                raise RuntimeError("no installation")
-            return super().token(repo, **permissions)
-
     def first(items: list[dict[str, Any]]) -> Any:
         return lambda path: items if path.endswith("&page=1") else []
 
@@ -208,6 +217,49 @@ def test_publish_opens_nothing_for_the_same_table_or_a_missing_marker(
     assert not [call for call in api.calls if call[0] != "GET"]
 
 
+def test_two_pull_requests_that_close_one_issue_are_one_task() -> None:
+    found = metrics.numbers([issue(1, "type:bug")], [pull(1), pull(1, cost="0.90")], {}, BOT)
+    assert found[0] == 1
+
+
+def test_the_write_token_is_asked_only_for_the_base_repo() -> None:
+    app = FakeApp(Hub(f"{START}\nNone yet.\n{END}\n"))
+    metrics.publish(app, replace(BASE, repos={"owner/repo": ".", "owner/other": "."}))
+    assert [repo for repo, asked in app.asked if "write" in asked.values()] == ["owner/repo"]
+
+
+def test_publish_opens_nothing_when_a_repo_could_not_be_read() -> None:
+    api = Hub(f"{START}\nNone yet.\n{END}\n")
+    base = replace(BASE, repos={"owner/down": ".", "owner/repo": "."})
+    line = metrics.publish(Flaky(api), base)
+    assert line == "metrics: owner/down could not be read: no installation, so nothing was opened"
+    assert not [call for call in api.calls if call[0] != "GET"]
+
+
+def test_publish_opens_nothing_while_a_metrics_issue_is_open() -> None:
+    api = Hub(f"{START}\nNone yet.\n{END}\n")
+    api.open = [issue(5, "metrics", state="open")]
+    line = metrics.publish(FakeApp(api), BASE)
+    assert line == "metrics: #5 is still open, so nothing was opened"
+    assert not [call for call in api.calls if call[0] != "GET"]
+
+
+@pytest.mark.parametrize("fails", ["/git/refs", "/contents/README.md", "/pulls"])
+def test_a_failed_call_closes_the_issue_and_deletes_the_branch(fails: str) -> None:
+    api = Hub(f"{START}\nNone yet.\n{END}\n", fails)
+    line = metrics.publish(FakeApp(api), BASE)
+    assert line.startswith("metrics: could not publish") and "\n" not in line
+    assert ("PATCH", "/issues/7", {"state": "closed"}) in api.calls
+    deleted = ("DELETE", "/git/refs/heads/agent/issue-7", None) in api.calls
+    assert deleted or fails == "/git/refs"
+
+
+def test_a_call_that_fails_before_the_issue_exists_closes_nothing() -> None:
+    api = Hub(f"{START}\nNone yet.\n{END}\n", "/issues")
+    assert metrics.publish(FakeApp(api), BASE).startswith("metrics: could not publish")
+    assert [call[0] for call in api.calls if call[0] != "GET"] == ["POST"]
+
+
 def test_the_readme_has_both_markers_under_key_numbers() -> None:
     section = (cli.ROOT / "README.md").read_text().split("\n## ")[1]
     assert section.startswith("Key numbers\n")
@@ -228,17 +280,24 @@ def test_the_watcher_publishes_once_when_a_request_file_asks(tmp_path: Path) -> 
     assert not request.exists()
 
 
-def test_dispatch_all_answers_a_metrics_request_after_the_pass(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("guarded", [True, False])
+def test_dispatch_all_answers_a_metrics_request_only_inside_the_guarded_pass(
+    monkeypatch: pytest.MonkeyPatch, guarded: bool
 ) -> None:
     order = list[str]()
+
+    def run_pass(app: Any, base: Any, targets: list[Any], each: Any) -> None:
+        if guarded:
+            each(targets[0], print)
+
     text = (cli.ROOT / "pyproject.toml").read_text()
     monkeypatch.setattr(dispatch, "show_main", lambda root, path: text)
     monkeypatch.setattr("sys.stdin", io.StringIO("the key"))
-    monkeypatch.setattr(dispatch, "run_pass", lambda *args, **kwargs: order.append("pass"))
+    monkeypatch.setattr(dispatch, "run_pass", run_pass)
+    monkeypatch.setattr(verify, "requested", lambda app, cfg, out: order.append("verify"))
     monkeypatch.setattr(cli, "requested", lambda app, base, out: order.append(out.__name__))
     assert cli.main(["dispatch-all", "--key-stdin"]) == 0
-    assert order == ["pass", "say"]
+    assert order == (["verify", "say"] if guarded else [])
 
 
 def test_metrics_publish_prints_what_publishing_did(
