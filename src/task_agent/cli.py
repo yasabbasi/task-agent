@@ -7,7 +7,7 @@ import sys
 from importlib.metadata import version
 from pathlib import Path
 
-from task_agent import config, dispatch, pr_format, readiness, verify, watch
+from task_agent import close_out, config, dispatch, pr_format, readiness, verify, watch
 from task_agent.app_token import App, read_key
 
 ROOT = config.ROOT
@@ -40,6 +40,11 @@ def cmd_pr_check(args: argparse.Namespace) -> int:
         print(f"::error::{problem}")
     print(f"pr-check: {len(problems)} problem(s)")
     return 1 if problems else 0
+
+
+def cmd_close_out(args: argparse.Namespace) -> int:
+    close_out.run_event(args.event, args.bot or config.load().bot)
+    return 0
 
 
 def loaded(args: argparse.Namespace) -> tuple[App, config.Config, config.Config]:
@@ -102,7 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     ready.add_argument("--event", help="path of a GitHub issues event, inside Actions")
     check = command("pr-check", cmd_pr_check, "check an App pull request, described in PR_*")
     check.add_argument("--files", required=True, help="file listing the changed paths")
-    check.add_argument("--bot", help="the App's bot login; defaults to this repo's config")
+    closed = command("close-out", cmd_close_out, "tidy up after a merged pull request")
+    closed.add_argument("--event", required=True, help="path of a pull_request closed event")
+    for parsed in (check, closed):
+        parsed.add_argument("--bot", help="the App's bot login; defaults to this repo's config")
     one = command("dispatch", cmd_dispatch, "run one pass over one repo")
     one.add_argument("--dry-run", action="store_true", help="list what would be taken")
     every = command("dispatch-all", cmd_dispatch_all, "run one pass over every configured repo")
