@@ -38,6 +38,9 @@ GIT_LOCK = threading.Lock()  # fetch, worktree add and worktree remove take git'
 CANCEL = threading.Event()
 SESSIONS: set[subprocess.Popen[str]] = set()
 SESSIONS_LOCK = threading.Lock()
+PINNED = ("pyproject.toml", "uv.lock", ".python-version")
+REWORK = "<!-- task-agent:rework -->\n"
+RUN_RE = re.compile(r"<!-- task-agent:run cost=(\d+\.\d+) turns=(\d+) secs=(\d+) -->")
 FIELDS = ("pr_title", "pr_body")
 SCHEMA = {
     "type": "object",
@@ -160,6 +163,66 @@ def select(api: Api, cfg: Config, waits: list[str]) -> list[Json]:
     return sorted(picks, key=priority)
 
 
+def pull_for(api: Api, cfg: Config, number: int) -> Json | None:
+    """The open pull request the App wrote for an issue from a branch in this repo, if any."""
+    branch = f"agent/issue-{number}"
+    for pull in api("GET", f"/pulls?state=open&head={quote(f'{cfg.owner}:{branch}')}"):
+        head = pull["head"]
+        ours = (head["repo"] or {}).get("full_name") == cfg.repo and head["ref"] == branch
+        if ours and pull["user"]["login"] == cfg.bot:
+            return dict(pull)
+    return None
+
+
+def feedback(api: Api, cfg: Config, pull: Json) -> list[str]:
+    """What the owner wrote on a pull request after its last push or rework, oldest first."""
+    number = pull["number"]
+    notes = api("GET", f"/issues/{number}/comments?per_page=100")
+    reviews = api("GET", f"/pulls/{number}/reviews?per_page=100")
+    approving = {r["id"] for r in reviews if r["state"] == "APPROVED"}
+    inline = [
+        c | {"body": f"{c['path']}: {c['body']}"}
+        for c in api("GET", f"/pulls/{number}/comments?per_page=100")
+        if c["pull_request_review_id"] not in approving
+    ]
+    marks = [c for c in notes if c["user"]["login"] == cfg.bot and REWORK in (c["body"] or "")]
+    pushed = api("GET", f"/commits/{pull['head']['sha']}")["commit"]["committer"]["date"]
+    since = max([pushed, *(c["created_at"] for c in marks)])
+    found = [*notes, *(r for r in reviews if r["id"] not in approving), *inline]
+    dated = [(c.get("submitted_at") or c.get("created_at") or "", c["body"] or "") for c in found]
+    mine = [c["user"]["login"] == cfg.owner for c in found]
+    return [text for (at, text), ok in sorted(zip(dated, mine, strict=True)) if ok and at > since]
+
+
+def conflicted(api: Api, number: int) -> bool | None:
+    """Whether a pull request conflicts with main; None while GitHub still doesn't know."""
+    for attempt in range(6):
+        time.sleep(2 if attempt else 0)
+        mergeable = api("GET", f"/pulls/{number}")["mergeable"]
+        if mergeable is not None:
+            return not mergeable
+    return None
+
+
+def reworks(api: Api, cfg: Config, out: Out) -> list[Json]:
+    """Issues in review whose pull request the owner commented on, or that conflicts with main."""
+    picks = []
+    for issue in labeled(api, "status:review"):
+        number = issue["number"]
+        try:
+            pull = pull_for(api, cfg, number)
+            due = pull and (feedback(api, cfg, pull) or conflicted(api, pull["number"]))
+            text = approved(api, number, cfg) if due else None
+        except Exception as exc:  # one failed lookup must not stop the pass
+            out(f"#{number}: rework check failed ({failure(exc).splitlines()[0]})")
+            continue
+        if text:
+            picks.append(issue | {"title": text["title"], "body": text["body"]})
+        elif pull and due is None:
+            out(f"#{number}: conflict check pending")
+    return picks
+
+
 def blockers(app: App, api: Api, issue: Json) -> list[str]:
     """Each dependency of a task that is not closed as completed, with why it still holds."""
     held = []
@@ -234,14 +297,35 @@ def prepare(cfg: Config, number: int, token: str) -> tuple[Path, str]:
     return worktree, (worktree / ".git").read_text()
 
 
+def checkout(cfg: Config, worktree: Path, gitfile: str, api: Api, pull: Json) -> str:
+    """Put the pull request's branch in a prepared worktree with origin/main merged in,
+    conflicts left as markers; return the owner's comments as the prompt's review text."""
+    ref = f"origin/{pull['head']['ref']}"
+    refspec, url = f"+refs/heads/{pull['head']['ref']}:refs/remotes/{ref}", f"{cfg.repo}.git"
+    with GIT_LOCK:
+        git(worktree, "fetch", "--quiet", f"https://github.com/{url}", refspec, token=api.token)
+    git(worktree, "reset", "--quiet", "--hard", ref)
+    try:
+        git(worktree, *identity(api.token, cfg.bot), "merge", "--no-commit", "origin/main")
+    except subprocess.CalledProcessError:
+        if not git(worktree, "ls-files", "--unmerged"):
+            raise
+    recheck(cfg, worktree, gitfile, {})
+    if changed := git(worktree, "diff", "--name-only", "origin/main", "--", *PINNED).split():
+        raise Blocked(f"refused a rework: the branch changes {', '.join(changed)}")
+    text = "\n\n".join(feedback(api, cfg, pull)).replace("</review>", "&lt;/review>")
+    how = "`main` is merged in: search for `<<<<<<<` and resolve every conflict you find."
+    return f"\nThis reworks the open pull request. {how}\n\n<review>\n{text}\n</review>\n"
+
+
 def render(template: str, values: dict[str, str]) -> str:
     """Fill {name} placeholders in one pass, so issue text can't add more of them."""
     return re.sub(r"\{(\w+)\}", lambda m: values.get(m[1], m[0]), template)
 
 
-def prompt_for(cfg: Config, issue: Json) -> str:
+def prompt_for(cfg: Config, issue: Json, review: str = "") -> str:
     """The task prompt from main's template, with the issue's text wrapped as data."""
-    values = {"number": str(issue["number"]), "repo": cfg.repo, "review": ""}
+    values = {"number": str(issue["number"]), "repo": cfg.repo, "review": review}
     for key in ("title", "body"):
         values[key] = (issue[key] or "").replace("</issue>", "&lt;/issue>")
     return render(show_main(cfg.root, "prompts/agent.md"), values)
@@ -333,6 +417,14 @@ def run_line(result: Json) -> str:
     return f"<!-- task-agent:run cost={cost:.2f} turns={turns} secs={secs} -->"
 
 
+def summed(result: Json, old: str) -> Json:
+    """The result with the totals from the last line of an old description added."""
+    line = RUN_RE.fullmatch((old.splitlines() or [""])[-1])
+    more = (float(line[1]), int(line[2]), int(line[3]) * 1000) if line else (0, 0, 0)
+    keys = ("total_cost_usd", "num_turns", "duration_ms")
+    return result | {key: (result.get(key) or 0) + n for key, n in zip(keys, more, strict=True)}
+
+
 def pr_body(text: str, number: int, result: Json) -> str:
     """The description with its closing line first and the run's cost line last."""
     text = text.replace("\r\n", "\n")
@@ -346,16 +438,21 @@ def one_line(text: str) -> str:
     return " ".join(text.split())[:72].rstrip() or "Update"
 
 
-def push(worktree: Path, token: str, repo: str, branch: str) -> None:
-    """Force-push HEAD to a branch at the repo's HTTPS URL, never to a named remote."""
+def push(worktree: Path, token: str, repo: str, branch: str, force: bool = True) -> None:
+    """Push HEAD to a branch at the repo's HTTPS URL, never to a named remote."""
     url, ref = f"https://github.com/{repo}.git", f"HEAD:refs/heads/{branch}"
-    git(worktree, "push", "--quiet", "--force", url, ref, token=token)
+    git(worktree, "push", "--quiet", *(["--force"] if force else []), url, ref, token=token)
 
 
 def commit(cfg: Config, worktree: Path, api: Api, title: str, result: Json) -> list[str]:
     """Commit the session's work as the App; return the changed paths, or raise Blocked."""
+    for name in git(worktree, "diff", "--name-only", "--diff-filter=U", "-z").split("\0"):
+        path = worktree / name
+        if path.is_file() and re.search("^<<<<<<<", path.read_text(errors="replace"), re.M):
+            raise Blocked(f"nothing was pushed: {name} still has a conflict marker", result)
+    merging = worktree / git(worktree, "rev-parse", "--git-path", "MERGE_HEAD").strip()
     git(worktree, "add", "-A")
-    if git(worktree, "diff", "--cached", "--name-only").strip():
+    if merging.exists() or git(worktree, "diff", "--cached", "--name-only").strip():
         # The message is the checked title: a squash merge may use it instead of the title.
         git(worktree, *identity(api.token, cfg.bot), "commit", "-q", "-m", title)
     if not git(worktree, "rev-list", "origin/main..HEAD").strip():
@@ -395,16 +492,24 @@ def repair(cfg: Config, worktree: Path, number: int, text: str, problems: str, r
     return text
 
 
-def publish(app: App, cfg: Config, worktree: Path, gitfile: str, number: int, result: Json) -> str:
-    """Commit, check, push and open the pull request; return what to print."""
+def publish(
+    app: App, cfg: Config, worktree: Path, gitfile: str, number: int, result: Json,
+    pull: Json | None = None,
+) -> str:  # fmt: skip
+    """Commit, check, push and open or update the pull request; return what to print."""
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)
     api = app.token(cfg.repo, contents="write", pull_requests="write", issues="write")
     branch, out = f"agent/issue-{number}", result["structured_output"]
     title, text = one_line(out["pr_title"]), out["pr_body"]
     files = commit(cfg, worktree, api, title, result)
+    notes, done = f"/issues/{(pull or {}).get('number')}/comments", "reworked"
+    if pull and len(set(git(worktree, "rev-parse", "HEAD", f"origin/{branch}").split())) == 1:
+        api("POST", notes, {"body": REWORK + "The rework session changed nothing."})
+        set_status(api, number, "status:review")
+        return "the rework changed nothing, back to status:review"
     for left in (2, 1, 0):
-        body = pr_body(text, number, result)
+        body = pr_body(text, number, summed(result, (pull or {}).get("body") or ""))
         found = pr_format.check(title, body, branch, files)
         problems = "\n".join(f"- {p}" for p in found)
         if not (left and found and all(p.startswith("the description") for p in found)):
@@ -415,14 +520,18 @@ def publish(app: App, cfg: Config, worktree: Path, gitfile: str, number: int, re
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)
-    push(worktree, api.token, cfg.repo, branch)
+    push(worktree, api.token, cfg.repo, branch, force=not pull)
     if problems:
         link = f"https://github.com/{cfg.repo}/tree/{branch}"
         raise Blocked(f"the work is on {link}, but its description fails:\n\n{problems}", result)
-    new = {"title": title, "head": branch, "base": "main", "body": body}
-    url = api("POST", "/pulls", new)["html_url"]
+    if pull:
+        api("PATCH", f"/pulls/{pull['number']}", {"title": title, "body": body})
+        api("POST", notes, {"body": REWORK + "Reworked: see the new commit and description."})
+    else:
+        new, done = {"title": title, "head": branch, "base": "main", "body": body}, "opened"
+        pull = api("POST", "/pulls", new)
     set_status(api, number, "status:review")
-    return f"opened {url}"
+    return f"{done} {pull['html_url']}"
 
 
 def failure(exc: BaseException) -> str:
@@ -452,15 +561,21 @@ def work(app: App, cfg: Config, issue: Json) -> str:
         return f"#{number}: claimed by another dispatcher until {exc}"
     worktree = cfg.clone / ".worktrees" / f"issue-{number}"
     result: Json = {}
+    pull, review = None, ""
     try:
-        worktree, gitfile = prepare(cfg, number, app.token(cfg.repo, contents="read").token)
-        result = run_agent(cfg, worktree, number, prompt_for(cfg, issue))
-        return f"#{number}: {publish(app, cfg, worktree, gitfile, number, result)}"
+        api = app.token(cfg.repo, contents="read", pull_requests="read")
+        pull = pull_for(api, cfg, number)
+        worktree, gitfile = prepare(cfg, number, api.token)
+        if pull:
+            review = checkout(cfg, worktree, gitfile, api, pull)
+        result = run_agent(cfg, worktree, number, prompt_for(cfg, issue, review))
+        return f"#{number}: {publish(app, cfg, worktree, gitfile, number, result, pull)}"
     except Exception as exc:  # every failure goes back to the owner instead of retrying forever
         # Ctrl-C also stops git and uv, which can fail here before the main thread sets CANCEL.
         if CANCEL.wait(1 if isinstance(exc, subprocess.SubprocessError) else 0):
-            set_status(app.token(cfg.repo, issues="write"), number, "status:ready")
-            return f"#{number}: cancelled, back to status:ready"
+            back = "status:review" if pull else "status:ready"
+            set_status(app.token(cfg.repo, issues="write"), number, back)
+            return f"#{number}: cancelled, back to {back}"
         reason = failure(exc)
         result = getattr(exc, "result", None) or result
         block(app.token(cfg.repo, issues="write"), number, reason, result)
@@ -505,7 +620,7 @@ def dispatch(app: App, cfg: Config, dry_run: bool = False, out: Out = say) -> No
     waits: list[str] = []
     found = [(task, blockers(app, api, task)) for task in select(api, cfg, waits)]
     waits += [f"#{t['number']}: waiting on {', '.join(held)}" for t, held in found if held]
-    tasks = [task for task, held in found if not held]
+    tasks = [task for task, held in found if not held] + reworks(api, cfg, waits.append)
     for task in tasks:
         out(f"#{task['number']}: {'would take' if dry_run else 'taking'} {task['title']!r}")
     for line in waits or ([] if tasks else [waiting(api, cfg)]):
