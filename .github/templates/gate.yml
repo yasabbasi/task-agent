@@ -1,0 +1,55 @@
+name: gate
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      # The pull request checks run first, from task-agent at a pinned commit, before any of
+      # the change's own code is checked out or run. A pull request can't weaken its checks.
+      - name: check out task-agent
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TASK_AGENT_REPO
+          ref: TASK_AGENT_SHA # TASK_AGENT_TAG
+          path: task-agent
+          persist-credentials: false
+      # No cache: one saved after a pull request's code ran could reach these checks next time.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.8"
+          enable-cache: false
+          ignore-empty-workdir: true
+      # The pull request's text reaches the script through the environment, never pasted in.
+      - name: pull request checks
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files.txt"
+          uv run --project task-agent --locked --no-dev task-agent pr-check \
+            --bot "TASK_AGENT_BOT" --files "$RUNNER_TEMP/files.txt"
+
+      - name: check out the change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make install
+      - run: make check

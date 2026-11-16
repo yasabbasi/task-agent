@@ -3,6 +3,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -108,3 +110,38 @@ def test_prompts_name_every_protected_path_and_the_refused_commands() -> None:
     agent = (ROOT / "prompts" / "agent.md").read_text()
     assert set(re.findall(r"\{(\w+)\}", agent)) == {"number", "repo", "title", "body", "review"}
     assert "Every section needs text" in agent and "No emoji" in agent
+
+
+TEMPLATES = sorted((ROOT / ".github" / "templates").glob("*.yml"))
+
+
+def test_there_is_a_template_for_each_workflow_another_repo_needs() -> None:
+    assert [t.name for t in TEMPLATES] == ["close-out.yml", "gate.yml", "readiness.yml"]
+
+
+@pytest.mark.parametrize("template", TEMPLATES, ids=lambda t: t.name)
+def test_templates_pin_actions_by_commit(template: Path) -> None:
+    for used in re.findall(r"uses: (\S+)", template.read_text()):
+        assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", used), used
+
+
+@pytest.mark.parametrize("template", TEMPLATES, ids=lambda t: t.name)
+def test_templates_run_task_agent_from_a_pinned_commit_with_locked_dependencies(
+    template: Path,
+) -> None:
+    text = template.read_text()
+    assert "repository: TASK_AGENT_REPO\n          ref: TASK_AGENT_SHA # TASK_AGENT_TAG" in text
+    assert "--locked --no-dev" in text
+    assert "enable-cache: false" in text
+
+
+def test_the_gate_template_checks_the_pull_request_before_it_runs_the_change() -> None:
+    gate = (ROOT / ".github" / "templates" / "gate.yml").read_text()
+    order = ["check out task-agent", "task-agent pr-check", "check out the change", "make check"]
+    assert sorted(order, key=gate.index) == order
+
+
+def test_the_close_out_template_never_checks_out_the_pull_request() -> None:
+    text = (ROOT / ".github" / "templates" / "close-out.yml").read_text()
+    assert text.count("actions/checkout@") == 1
+    assert "repository: TASK_AGENT_REPO" in text
