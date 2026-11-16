@@ -107,3 +107,4 @@ def test_prompts_name_every_protected_path_and_the_refused_commands() -> None:
     assert "git command is refused" in rules and "make loc" in rules
     agent = (ROOT / "prompts" / "agent.md").read_text()
     assert set(re.findall(r"\{(\w+)\}", agent)) == {"number", "repo", "title", "body", "review"}
+    assert "Every section needs text" in agent and "No emoji" in agent
