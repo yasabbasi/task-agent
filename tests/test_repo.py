@@ -101,6 +101,14 @@ def test_workflows_pin_actions_by_commit() -> None:
             assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", used), used
 
 
+def test_close_out_runs_from_the_default_branch_and_never_checks_out_the_pull_request() -> None:
+    text = (ROOT / ".github" / "workflows" / "close-out.yml").read_text()
+    assert "pull_request_target" in text
+    assert text.count("actions/checkout@") == 1
+    assert "ref: ${{ github.event.repository.default_branch }}" in text
+    assert "${{" not in "".join(line for line in text.splitlines() if "run:" in line)
+
+
 def test_prompts_name_every_protected_path_and_the_refused_commands() -> None:
     rules = (ROOT / "prompts" / "rules.md").read_text()
     for name in (".github/", ".claude/", ".mcp.json", "prompts/", "Makefile", "pyproject.toml"):
