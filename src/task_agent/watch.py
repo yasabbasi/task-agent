@@ -95,8 +95,8 @@ def watch(every: int, key_fd: int | None) -> None:
             say("main changed: restarting on the new code")
             restart(key, every)
         (STATE / "requests" / "wake").unlink(missing_ok=True)
+        unserved = set(os.listdir(STATE / "requests"))  # a request new since here ends the sleep
         one_pass(key)
-        unserved = set(os.listdir(STATE / "requests"))  # a new request ends the sleep early
         for _ in range(every // 5):
             if set(os.listdir(STATE / "requests")) - unserved:
                 break
