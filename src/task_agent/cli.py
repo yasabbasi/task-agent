@@ -7,7 +7,7 @@ import sys
 from importlib.metadata import version
 from pathlib import Path
 
-from task_agent import close_out, config, dispatch, pr_format, readiness, verify, watch
+from task_agent import close_out, config, dispatch, init, pr_format, readiness, verify, watch
 from task_agent.app_token import App, read_key
 
 ROOT = config.ROOT
@@ -91,6 +91,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if all(ok for ok, _ in results) else 1
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    base = config.load(dispatch.show_main(ROOT, "pyproject.toml"))
+    init.run(base, base.target(args.repo, args.clone))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one command and return its exit code."""
     parser = argparse.ArgumentParser(prog="task-agent")
@@ -121,7 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     guard.add_argument("--pr", type=int, help="an open, unapproved App pull request to try")
     guard.add_argument("--skip-session", action="store_true", help="skip the session checks")
     guard.add_argument("--request", action="store_true", help="ask the running watcher to do it")
-    for parsed in (one, guard):
+    setup = command("init", cmd_init, "set up a repo for the loop, or bring it up to date")
+    for parsed in (one, guard, setup):
         parsed.add_argument("--repo", help="owner/name; defaults to this repo")
         parsed.add_argument("--clone", help="its local clone; defaults to the configured one")
 
