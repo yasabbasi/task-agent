@@ -1,6 +1,6 @@
 [project]
 name = "task-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "Turn a request typed into Claude into a reviewed, merged pull request."
 readme = "README.md"
 license = "MIT"
