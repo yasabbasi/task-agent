@@ -21,7 +21,12 @@ flowchart LR
 ## Key numbers
 
 <!-- metrics:start -->
-None yet. The loop's metrics appear here once tasks have run.
+| Repo | Tasks | Ready to review | Open to merge | Median cost | Total cost | Human-authored |
+| --- | --- | --- | --- | --- | --- | --- |
+| yasabbasi/task-agent | 24 | 8 min | 33 min | $1.08 | $29.57 | 10 |
+| yasabbasi/data-pipeline | 2 | 6 min | 2 min | $1.11 | $2.22 | 3 |
+| yasabbasi/mcp-server | 6 | 24 min | 11 min | $1.35 | $7.80 | 2 |
+| Total | 32 | 9 min | 23 min | $1.15 | $39.59 | 15 |
 <!-- metrics:end -->
 
 `make metrics PUBLISH=1` opens a pull request from the App that refreshes this table.
