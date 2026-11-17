@@ -39,7 +39,10 @@ CANCEL = threading.Event()
 SESSIONS: set[subprocess.Popen[str]] = set()
 SESSIONS_LOCK = threading.Lock()
 PINNED = ("pyproject.toml", "uv.lock", ".python-version")
-REWORK = "<!-- task-agent:rework -->\n"
+REWORK = "<!-- task-agent:rework until={} -->\n"
+REWORK_RE = re.compile(r"<!-- task-agent:rework(?: until=(\S+))? -->\n")
+NOT_TAKEN = "#{}: not taken, the label isn't the owner's, or the issue changed after it."
+NOT_TAKEN += " The owner adds `status:ready` again"
 RUN_RE = re.compile(r"<!-- task-agent:run cost=(\d+\.\d+) turns=(\d+) secs=(\d+) -->")
 FIELDS = ("pr_title", "pr_body")
 SCHEMA = {
@@ -125,10 +128,16 @@ def approved(api: Api, number: int, cfg: Config) -> Json | None:
     return None if any(at and at >= owners[-1] for at in [*edits, issue["lastEditedAt"]]) else issue
 
 
+def pages(api: Api, path: str, page: int = 1) -> list[Json]:
+    """Every item of a list, read through each page of 100."""
+    found: list[Json] = api("GET", f"{path}?per_page=100&page={page}")
+    return found + (pages(api, path, page + 1) if len(found) == 100 else [])
+
+
 def live_claims(api: Api, number: int, bot: str) -> list[tuple[int, str, str]]:
     """(comment id, run id, expiry) of unexpired claims posted by the App, oldest first."""
     claims = []
-    for comment in api("GET", f"/issues/{number}/comments?per_page=100"):
+    for comment in pages(api, f"/issues/{number}/comments"):
         match = CLAIM_RE.match(comment["body"] or "")
         if match and comment["user"]["login"] == bot and datetime.fromisoformat(match[2]) > now():
             claims.append((int(comment["id"]), match[1], match[2]))
@@ -157,8 +166,7 @@ def select(api: Api, cfg: Config, waits: list[str]) -> list[Json]:
             if text := approved(api, number, cfg):
                 picks.append(issue | {"title": text["title"], "body": text["body"]})
             else:
-                why = "the label isn't the owner's, or the issue changed after it"
-                waits.append(f"#{number}: not taken, {why}. The owner adds `status:ready` again")
+                waits.append(NOT_TAKEN.format(number))
     return sorted(picks, key=priority)
 
 
@@ -173,24 +181,27 @@ def pull_for(api: Api, cfg: Config, number: int) -> Json | None:
     return None
 
 
-def feedback(api: Api, cfg: Config, pull: Json) -> list[str]:
-    """What the owner wrote on a pull request after its last push or rework, oldest first."""
+def feedback(api: Api, cfg: Config, pull: Json) -> tuple[str, list[str]]:
+    """What the owner wrote on a pull request after its last push, or after the newest comment
+    the last rework was given, oldest first; and the time of the newest of them."""
     number = pull["number"]
-    notes = api("GET", f"/issues/{number}/comments?per_page=100")
-    reviews = api("GET", f"/pulls/{number}/reviews?per_page=100")
+    notes = pages(api, f"/issues/{number}/comments")
+    reviews = pages(api, f"/pulls/{number}/reviews")
     approving = {r["id"] for r in reviews if r["state"] == "APPROVED"}
     inline = [
         c | {"body": f"{c['path']}: {c['body']}"}
-        for c in api("GET", f"/pulls/{number}/comments?per_page=100")
+        for c in pages(api, f"/pulls/{number}/comments")
         if c["pull_request_review_id"] not in approving
     ]
-    marks = [c for c in notes if c["user"]["login"] == cfg.bot and REWORK in (c["body"] or "")]
+    ours = [(c, REWORK_RE.search(c["body"] or "")) for c in notes if c["user"]["login"] == cfg.bot]
+    marks = [m[1] or c["created_at"] for c, m in ours if m]
     pushed = api("GET", f"/commits/{pull['head']['sha']}")["commit"]["committer"]["date"]
-    since = max([pushed, *(c["created_at"] for c in marks)])
+    since = marks[-1] if marks else pushed
     found = [*notes, *(r for r in reviews if r["id"] not in approving), *inline]
     dated = [(c.get("submitted_at") or c.get("created_at") or "", c["body"] or "") for c in found]
     mine = [c["user"]["login"] == cfg.owner for c in found]
-    return [text for (at, text), ok in sorted(zip(dated, mine, strict=True)) if ok and at > since]
+    new = [said for said, ok in sorted(zip(dated, mine, strict=True)) if ok and said[0] > since]
+    return max([since, *(at for at, _ in new)]), [text for _, text in new]
 
 
 def conflicted(api: Api, number: int) -> bool | None:
@@ -210,13 +221,15 @@ def reworks(api: Api, cfg: Config, out: Out) -> list[Json]:
         number = issue["number"]
         try:
             pull = pull_for(api, cfg, number)
-            due = pull and (feedback(api, cfg, pull) or conflicted(api, pull["number"]))
+            due = pull and (feedback(api, cfg, pull)[1] or conflicted(api, pull["number"]))
             text = approved(api, number, cfg) if due else None
         except Exception as exc:  # one failed lookup must not stop the pass
             out(f"#{number}: rework check failed ({failure(exc).splitlines()[0]})")
             continue
         if text:
             picks.append(issue | {"title": text["title"], "body": text["body"]})
+        elif due:
+            out(NOT_TAKEN.format(number))
         elif pull and due is None:
             out(f"#{number}: conflict check pending")
     return picks
@@ -314,8 +327,12 @@ def checkout(cfg: Config, worktree: Path, gitfile: str, api: Api, pull: Json) ->
     recheck(worktree, gitfile, {}, "origin/main")
     if changed := git(worktree, "diff", "--name-only", "origin/main", "--", *PINNED).split():
         raise Blocked(f"refused a rework: the branch changes {', '.join(changed)}")
-    text = "\n\n".join(feedback(api, cfg, pull)).replace("</review>", "&lt;/review>")
+    names = git(worktree, "diff", "--name-only", "--diff-filter=U", "-z").split("\0")[:-1]
+    pull["unmerged"] = {n: (worktree / n).read_bytes() for n in names if (worktree / n).is_file()}
+    pull["until"], notes = feedback(api, cfg, pull)
+    text = "\n\n".join(notes).replace("</review>", "&lt;/review>")
     how = "`main` is merged in: search for `<<<<<<<` and resolve every conflict you find."
+    how += f" Git left these files unmerged: {', '.join(names) or 'none'}."
     return f"\nThis reworks the open pull request. {how}\n\n<review>\n{text}\n</review>\n"
 
 
@@ -446,12 +463,17 @@ def push(worktree: Path, token: str, repo: str, branch: str, force: bool = True)
     git(worktree, "push", "--quiet", *(["--force"] if force else []), url, ref, token=token)
 
 
-def commit(cfg: Config, worktree: Path, api: Api, title: str, result: Json) -> list[str]:
+def commit(
+    cfg: Config, worktree: Path, api: Api, title: str, result: Json, left: dict[str, bytes]
+) -> list[str]:
     """Commit the session's work as the App; return the changed paths, or raise Blocked."""
+    # left holds each file git left unmerged, as it was before the session.
     for name in git(worktree, "diff", "--name-only", "--diff-filter=U", "-z").split("\0"):
         path = worktree / name
         if path.is_file() and re.search("^<<<<<<<", path.read_text(errors="replace"), re.M):
             raise Blocked(f"nothing was pushed: {name} still has a conflict marker", result)
+        if path.is_file() and path.read_bytes() == left.get(name):
+            raise Blocked(f"nothing was pushed: {name} is still unmerged", result)
     merging = worktree / git(worktree, "rev-parse", "--git-path", "MERGE_HEAD").strip()
     git(worktree, "add", "-A")
     if merging.exists() or git(worktree, "diff", "--cached", "--name-only").strip():
@@ -507,10 +529,11 @@ def publish(
     api = app.token(cfg.repo, contents="write", pull_requests="write", issues="write")
     branch, out = f"agent/issue-{number}", result["structured_output"]
     title, text = one_line(out["pr_title"]), out["pr_body"]
-    files = commit(cfg, worktree, api, title, result)
+    files = commit(cfg, worktree, api, title, result, (pull or {}).get("unmerged", {}))
     notes, done = f"/issues/{(pull or {}).get('number')}/comments", "reworked"
+    mark = REWORK.format((pull or {}).get("until"))
     if pull and len(set(git(worktree, "rev-parse", "HEAD", f"origin/{branch}").split())) == 1:
-        api("POST", notes, {"body": REWORK + "The rework session changed nothing."})
+        api("POST", notes, {"body": mark + "The rework session changed nothing."})
         set_status(api, number, "status:review")
         return "the rework changed nothing, back to status:review"
     for left in (2, 1, 0):
@@ -531,7 +554,7 @@ def publish(
         raise Blocked(f"the work is on {link}, but its description fails:\n\n{problems}", result)
     if pull:
         api("PATCH", f"/pulls/{pull['number']}", {"title": title, "body": body})
-        api("POST", notes, {"body": REWORK + "Reworked: see the new commit and description."})
+        api("POST", notes, {"body": mark + "Reworked: see the new commit and description."})
     else:
         new, done = {"title": title, "head": branch, "base": "main", "body": body}, "opened"
         pull = api("POST", "/pulls", new)
