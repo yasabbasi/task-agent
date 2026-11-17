@@ -137,7 +137,7 @@ closed, and labels a pull request the App didn't write `human-authored`.
 - a planted `.mcp.json` and a user-level skill are not loaded
 - a $0.01 budget stops a session
 
-Each line reads `pass` or `fail`. Platform note: the planted keychain item that a session
+Each line reads `pass`, `fail` or `skip`. Platform note: the planted keychain item that a session
 must fail to read is a macOS check, and is skipped on other systems.
 
 ## Running elsewhere

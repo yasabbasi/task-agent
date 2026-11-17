@@ -1,6 +1,8 @@
 # task-agent
 
 A request typed into Claude becomes a reviewed, merged pull request in any repo, with metrics.
+The loop also works on [data-pipeline](https://github.com/yasabbasi/data-pipeline) and
+[mcp-server](https://github.com/yasabbasi/mcp-server).
 
 ```mermaid
 flowchart LR
@@ -88,6 +90,20 @@ and `make verify` proves the guardrails hold.
 
 [docs/operations.md](docs/operations.md) covers the watcher, its requests, its log, blocked
 tasks and running it elsewhere.
+
+### The demo
+
+On 2026-11-16 Claude, asked through mcp-server for orders by category in October 2026,
+relayed the server's refusal, because one order can span categories. Two agent pull requests
+defined and published contract v2 in data-pipeline
+([#5](https://github.com/yasabbasi/data-pipeline/pull/5),
+[#7](https://github.com/yasabbasi/data-pipeline/pull/7)). A person released it and copied the
+samples ([data-pipeline#9](https://github.com/yasabbasi/data-pipeline/pull/9),
+[mcp-server#22](https://github.com/yasabbasi/mcp-server/pull/22)). An agent task that waited
+across repos made mcp-server serve v2
+([#23](https://github.com/yasabbasi/mcp-server/pull/23)), sent back once by a comment and
+reworked. Asked again, Claude answered: Intimates 536, Tops & Tees 507, Jeans 496, and said
+not to add the categories up.
 
 ### How it was built
 

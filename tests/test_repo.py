@@ -96,6 +96,27 @@ def test_readme_is_under_150_lines_with_a_guardrails_table_and_a_next_list() -> 
         assert said in how, said
 
 
+def test_readme_tells_the_demo_before_how_it_was_built_and_links_the_other_repos() -> None:
+    readme = DOCS["README.md"]
+    intro = readme.split("## Key numbers")[0]
+    for repo in ("data-pipeline", "mcp-server"):
+        assert f"(https://github.com/yasabbasi/{repo})" in intro, repo
+    how = readme.split("## How it works")[1].split("\n## ")[0]
+    demo = how.split("\n### The demo\n")[1].split("\n### ")[0]
+    assert how.index("### The demo") < how.index("### How it was built")
+    assert len(demo.strip().splitlines()) <= 14
+    for pr in ("data-pipeline/pull/5", "data-pipeline/pull/7", "data-pipeline/pull/9"):
+        assert f"https://github.com/yasabbasi/{pr}" in demo, pr
+    for pr in ("mcp-server/pull/22", "mcp-server/pull/23"):
+        assert f"https://github.com/yasabbasi/{pr}" in demo, pr
+    for said in ("Intimates 536", "Tops & Tees 507", "Jeans 496", "v2"):
+        assert said in demo, said
+
+
+def test_operations_says_each_verify_line_reads_pass_fail_or_skip() -> None:
+    assert "Each line reads `pass`, `fail` or `skip`." in DOCS["docs/operations.md"]
+
+
 def test_operations_covers_init_metrics_blocked_tasks_lessons_and_running_elsewhere() -> None:
     text = DOCS["docs/operations.md"]
     for heading in ("Setting up another repo", "When a task is blocked", "Lessons"):
