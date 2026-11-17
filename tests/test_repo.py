@@ -64,6 +64,48 @@ def test_readme_only_names_make_targets_that_exist() -> None:
     assert named and named <= targets
 
 
+DOCS = {name: (ROOT / name).read_text() for name in ("README.md", "docs/operations.md")}
+
+
+@pytest.mark.parametrize("name", DOCS)
+def test_docs_do_not_assume_a_mac(name: str) -> None:
+    assert not re.search(r"\bMacs?\b|Touch ID|Homebrew", DOCS[name])
+    assert "the machine that runs the watcher" in DOCS[name]
+    assert "`TASK_AGENT_KEY_FILE`" in DOCS[name] and "1Password" in DOCS[name]
+
+
+def test_docs_only_name_make_targets_that_exist() -> None:
+    targets = set(re.findall(r"^([a-z-]+):", (ROOT / "Makefile").read_text(), flags=re.M))
+    assert set(re.findall(r"`make ([a-z-]+)", DOCS["docs/operations.md"])) <= targets
+
+
+def test_readme_is_under_150_lines_with_a_guardrails_table_and_a_next_list() -> None:
+    readme = DOCS["README.md"]
+    assert len(readme.splitlines()) < 150
+    how = readme.split("## How it works")[1].split("\n## ")[0]
+    table = re.findall(r"^\| (?!Guardrail|---)(.+?) \| (.+?) \| (.+?) \|$", how, flags=re.M)
+    assert len(table) == 9
+    rows = " ".join(row[0] for row in table)
+    for word in ("owner", "sandbox", "`main`", "token", "Protected", "gate", "ruleset", "Rework"):
+        assert word in rows, word
+    assert "visible text" in rows
+    following = how.split("### Next")[1]
+    for item in ("forecast", "sample sync", "Slack", "roject boards", "loud dispatch", "reviewer"):
+        assert item in following, item
+    for said in ("`make send-back", "Depends on", "close-out", "`make init REPO=owner/name`"):
+        assert said in how, said
+
+
+def test_operations_covers_init_metrics_blocked_tasks_lessons_and_running_elsewhere() -> None:
+    text = DOCS["docs/operations.md"]
+    for heading in ("Setting up another repo", "When a task is blocked", "Lessons"):
+        assert f"\n## {heading}\n" in text, heading
+    elsewhere = text.split("\n## Running elsewhere\n")[1].split("\n## ")[0]
+    for said in ("stateless", "scheduler", "container", "Not built yet", "`make verify`"):
+        assert said in elsewhere, said
+    assert "`.worktrees/requests/metrics`" in text and "version tag" in text
+
+
 def test_task_skill_and_form_use_the_headings_the_parser_reads() -> None:
     from task_agent import readiness
 
