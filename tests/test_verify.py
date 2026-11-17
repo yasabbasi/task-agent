@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 import urllib.error
 import uuid
 from collections.abc import Callable
@@ -28,6 +29,7 @@ REFUSED = {name: "refused (PermissionError)" for name in ("network", "read a key
 INIT = {"type": "system", "subtype": "init", "mcp_servers": [], "slash_commands": []}
 OVER = result(subtype="error_max_budget_usd", is_error=True)
 WORD = "0123456789abcdef0123456789abcdef"
+KEYCHAIN = verify.keychain
 
 
 class NarrowApp(FakeApp):
@@ -167,6 +169,36 @@ def test_anything_a_session_managed_to_do_fails_its_check(
     ]
 
 
+def test_the_keychain_probe_runs_only_on_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran: list[list[str]] = []
+
+    def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert verify.keychain("delete-generic-password") is None and ran == []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert verify.keychain("delete-generic-password") is True and ran[0][0] == "security"
+
+
+def test_off_darwin_the_keychain_checks_are_skipped_and_do_not_fail(
+    cfg: config.Config, claude: Plan, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(verify, "keychain", KEYCHAIN)
+    found = REFUSED | {"read a keychain item": "not tested ([Errno 2] security)"}
+    probe = {"files": {"probe.json": json.dumps(found)}, "output": [INIT, tools(home), result()]}
+    claude(probe, {"output": [OVER]})
+    results = verify.session_checks(cfg, "t")
+    assert [text for ok, text in results if ok is False] == []
+    assert [text for ok, text in results if ok is None] == [
+        "in a session, read a keychain item: not tested ([Errno 2] security)",
+        "a keychain item was planted for the probe to look for",
+    ]
+
+
 def test_a_session_that_never_starts_proves_nothing(
     cfg: config.Config, claude: Plan, home: Path
 ) -> None:
@@ -207,7 +239,7 @@ def test_the_watcher_verifies_a_repo_when_a_request_file_asks(
 
     def run(app: Any, cfg: config.Config, pr: int | None = None) -> list[verify.Result]:
         asked.append(pr)
-        return [(True, "a"), (False, "b")]
+        return [(True, "a"), (False, "b"), (None, "c")]
 
     monkeypatch.setattr(verify, "run", run)
     verify.requested(FakeApp(), cfg, lines.append)
@@ -216,5 +248,5 @@ def test_the_watcher_verifies_a_repo_when_a_request_file_asks(
     request.parent.mkdir(parents=True)
     request.write_text("5")
     verify.requested(FakeApp(), cfg, lines.append)
-    assert lines == ["verify pass: a", "verify fail: b"] and asked == [5]
+    assert lines == ["verify pass: a", "verify fail: b", "verify skip: c"] and asked == [5]
     assert not request.exists()

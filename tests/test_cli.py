@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from conftest import SECTIONS
 
-from task_agent import cli, dispatch
+from task_agent import cli, dispatch, verify
 from task_agent.app_token import App
 from task_agent.config import Config
 
@@ -102,6 +102,24 @@ def test_verify_request_leaves_a_file_for_the_watcher(
     assert (requests / "verify-task-agent").read_text() == ""
     with pytest.raises(SystemExit, match="o/typo is not under"):
         cli.main(["verify", "--request", "--repo", "o/typo"])
+
+
+def test_the_watch_help_says_the_key_is_read_once(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    assert "reads the App's key once" in capsys.readouterr().out
+
+
+def test_verify_prints_a_skipped_check_and_does_not_fail_on_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "loaded", lambda args: (None, None, None))
+    monkeypatch.setattr(verify, "run", lambda *args, **kwargs: [(True, "a"), (None, "b")])
+    assert cli.main(["verify"]) == 0
+    assert capsys.readouterr().out == "pass: a\nskip: b\n"
+    monkeypatch.setattr(verify, "run", lambda *args, **kwargs: [(False, "a"), (None, "b")])
+    assert cli.main(["verify"]) == 1
+    assert capsys.readouterr().out == "fail: a\nskip: b\n"
 
 
 def test_dispatch_all_covers_every_configured_repo_with_main_settings(

@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -27,10 +28,29 @@ def test_machine_checks_name_a_fix_for_each_tool(
         "op": (False, ""),
     }
     monkeypatch.setattr(doctor, "run", lambda *cmd, cwd=None: answers[cmd[0]])
+    monkeypatch.delenv("TASK_AGENT_KEY_FILE", raising=False)
     checks = doctor.machine()
     assert [ok for ok, _, _ in checks] == [False, True, False]
     assert checks[0][2] == "gh auth refresh -s repo,workflow"
     assert "1Password" in checks[2][2]
+
+
+def test_a_key_file_is_checked_in_place_of_1password(
+    doctor: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ran: list[str] = []
+
+    def run(*cmd: str, cwd: Path | None = None) -> tuple[bool, str]:
+        ran.append(cmd[0])
+        return True, ""
+
+    monkeypatch.setattr(doctor, "run", run)
+    monkeypatch.setenv("TASK_AGENT_KEY_FILE", str(tmp_path / "key.pem"))
+    ok, text, fix = doctor.machine()[2]
+    assert not ok and "key.pem" in text and "TASK_AGENT_KEY_FILE" in fix
+    assert "op" not in ran and not re.search("1Password|macOS", fix)
+    (tmp_path / "key.pem").write_text("pem")
+    assert doctor.machine()[2][0] is True
 
 
 def test_clone_checks_want_an_https_origin_and_a_tracked_main(
