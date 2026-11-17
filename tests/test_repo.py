@@ -162,6 +162,16 @@ def test_prompts_name_every_protected_path_and_the_refused_commands() -> None:
     assert "Every section needs text" in agent and "No emoji" in agent
 
 
+def test_sessions_may_delete_files_only_because_the_sandbox_confines_them() -> None:
+    settings = json.loads((ROOT / ".claude" / "agent-settings.json").read_text())
+    sandbox = settings["sandbox"]
+    assert "Bash(rm *)" in settings["permissions"]["allow"]
+    assert sandbox["enabled"] and sandbox["failIfUnavailable"]
+    assert sandbox["allowUnsandboxedCommands"] is False
+    assert "$WORKTREE/.git" in sandbox["filesystem"]["denyWrite"]
+    assert "`rm`" in (ROOT / "prompts" / "rules.md").read_text()
+
+
 def test_prompts_carry_the_lessons_moved_into_them() -> None:
     assert "Edit and Write tools" in (ROOT / "prompts" / "rules.md").read_text()
     assert "to see it fail" in (ROOT / "prompts" / "agent.md").read_text()
