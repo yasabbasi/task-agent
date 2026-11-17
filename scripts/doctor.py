@@ -21,15 +21,20 @@ def run(*cmd: str, cwd: Path | None = None) -> tuple[bool, str]:
 
 
 def machine() -> list[Check]:
-    """The tools: gh's scopes, the claude sign-in and 1Password's CLI."""
+    """The tools: gh's scopes, the claude sign-in, and the key file or 1Password's CLI."""
     _, scopes = run("gh", "auth", "status")
-    fix = "turn on 1Password's CLI integration, and on macOS 27 allow your terminal under"
-    fix += " Files & Folders > Data shared by 1Password"
+    if path := os.environ.get("TASK_AGENT_KEY_FILE"):
+        fix = "point TASK_AGENT_KEY_FILE at a file that holds the App's private key"
+        key = (os.access(path, os.R_OK) and Path(path).is_file(), f"{path} can be read", fix)
+    else:
+        fix = "turn on 1Password's CLI integration, and on macOS 27 allow your terminal under"
+        fix += " Files & Folders > Data shared by 1Password"
+        key = (run("op", "vault", "list")[0], "op can list vaults", fix)
     return [
         ("'repo'" in scopes and "'workflow'" in scopes, "gh has the repo and workflow scopes",
          "gh auth refresh -s repo,workflow"),
         (run("claude", "auth", "status")[0], "claude is signed in", "run `claude` and sign in"),
-        (run("op", "vault", "list")[0], "op can list vaults", fix),
+        key,
     ]  # fmt: skip
 
 

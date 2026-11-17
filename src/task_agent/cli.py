@@ -98,8 +98,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     app, _, target = loaded(args)
     results = verify.run(app, target, args.pr, sessions=not args.skip_session)
     for ok, text in results:
-        print(f"{'pass' if ok else 'fail'}: {text}")
-    return 0 if all(ok for ok, _ in results) else 1
+        print(f"{verify.WORDS[ok]}: {text}")
+    return 0 if all(ok is not False for ok, _ in results) else 1
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     stats.add_argument("--publish", action="store_true", help="open a pull request with them")
     for parsed in (every, stats):
         parsed.add_argument("--key-stdin", action="store_true", help="read the App key from stdin")
-    loop = command("watch", cmd_watch, "keep running passes; asks for Touch ID once")
+    loop = command("watch", cmd_watch, "keep running passes; reads the App's key once")
     loop.add_argument("--every", type=int, default=600, help="seconds between passes")
     loop.add_argument("--key-fd", type=int, help=argparse.SUPPRESS)
     guard = command("verify", cmd_verify, "check that the guardrails hold for one repo")

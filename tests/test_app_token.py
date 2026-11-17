@@ -1,4 +1,6 @@
+import re
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -70,6 +72,43 @@ def test_api_calls_are_scoped_to_the_repo_and_graphql_errors_are_raised(
 
 def test_a_key_that_cannot_be_read_stops_with_the_fix(monkeypatch: pytest.MonkeyPatch) -> None:
     failed = subprocess.CompletedProcess(["op"], 1, stdout="", stderr='"k" isn\'t a document')
+    monkeypatch.delenv("TASK_AGENT_KEY_FILE", raising=False)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: failed)
-    with pytest.raises(SystemExit, match="op could not read 'k' from 'v'.*\n.*make doctor"):
+    with pytest.raises(SystemExit, match="op could not read 'k' from 'v'.*\n.*make doctor") as stop:
         app_token.read_key("k", "v")
+    assert "TASK_AGENT_KEY_FILE" in str(stop.value)
+
+
+def test_the_key_comes_from_1password_when_no_key_file_is_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    done = subprocess.CompletedProcess(["op"], 0, stdout="from op", stderr="")
+    monkeypatch.delenv("TASK_AGENT_KEY_FILE", raising=False)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: done)
+    assert app_token.read_key("k", "v") == "from op"
+
+
+def test_the_key_comes_from_the_file_the_environment_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "key.pem").write_text("from a file")
+    monkeypatch.setenv("TASK_AGENT_KEY_FILE", str(tmp_path / "key.pem"))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("asked 1Password"))
+    assert app_token.read_key("k", "v") == "from a file"
+
+
+def test_a_key_file_that_cannot_be_read_stops_with_one_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("TASK_AGENT_KEY_FILE", str(tmp_path / "missing.pem"))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("asked 1Password"))
+    with pytest.raises(SystemExit) as stop:
+        app_token.read_key("k", "v")
+    message = str(stop.value)
+    assert message.startswith("could not read the key file") and "missing.pem" in message
+    assert "\n" not in message
+
+
+def test_nothing_in_src_mentions_touch_id_or_a_mac() -> None:
+    for path in Path(app_token.__file__).parent.glob("*.py"):
+        assert not re.search(r"Touch ID|\bMac\b", path.read_text()), path.name

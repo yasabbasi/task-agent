@@ -1,9 +1,11 @@
-"""GitHub App tokens. The key goes from 1Password into memory, never to disk."""
+"""GitHub App tokens. The key is held in memory and this code never writes it to disk."""
 
 import json
+import os
 import subprocess
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -12,14 +14,18 @@ API = "https://api.github.com"
 
 
 def read_key(title: str, vault: str) -> str:
-    """Fetch the App's private key from 1Password, which asks for Touch ID."""
+    """The App's private key, from the file TASK_AGENT_KEY_FILE names or else from 1Password."""
+    if path := os.environ.get("TASK_AGENT_KEY_FILE"):
+        try:
+            return Path(path).read_text()
+        except OSError as exc:
+            raise SystemExit(f"could not read the key file {path}: {exc}") from None
     cmd = ["op", "document", "get", title, "--vault", vault]
     done = subprocess.run(cmd, capture_output=True, text=True)
     if done.returncode:
-        fix = "Fix: check key_title and key_vault in pyproject.toml, then run `make doctor`"
-        raise SystemExit(
-            f"op could not read {title!r} from {vault!r}: {done.stderr.strip()}\n{fix}"
-        )
+        why = f"op could not read {title!r} from {vault!r}: {done.stderr.strip()}"
+        fix = "Fix: run `make doctor`, or name a file that holds the key in TASK_AGENT_KEY_FILE"
+        raise SystemExit(f"{why}\n{fix}")
     return done.stdout
 
 
