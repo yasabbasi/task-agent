@@ -400,6 +400,7 @@ def run_agent(
         "--restricted", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--strict-mcp-config",
         "--disable-slash-commands", "--permission-mode", "dontAsk", "--permission-prompts", "none",
         "--max-turns", str(cfg.max_turns), "--max-budget-usd", str(cfg.budget_usd),
+        *(["--model", cfg.model] if cfg.model else []),
         "--json-schema", json.dumps(SCHEMA), "--no-session-persistence",
         "--settings", agent_settings(cfg, worktree),
         "--append-system-prompt", rules or show_main(cfg.root, "prompts/rules.md"),

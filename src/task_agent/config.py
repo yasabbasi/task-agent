@@ -21,6 +21,7 @@ class Config:
     max_turns: int = 40
     budget_usd: float = 3.0
     timeout_min: int = 50
+    model: str = ""
     agent_commands: tuple[str, ...] = ()
     repos: dict[str, str] = field(default_factory=dict)
     root: Path = ROOT

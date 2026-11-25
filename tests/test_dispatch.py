@@ -238,6 +238,17 @@ def test_a_task_goes_from_claim_to_pull_request(
     assert argv[argv.index("--tools") + 1] == "Bash,Read,Edit,Write,Glob,Grep"
     assert argv[argv.index("--max-turns") + 1] == "40"
     assert argv[argv.index("--max-budget-usd") + 1] == "3.0"
+    assert "--model" not in argv
+
+
+def test_a_set_model_is_passed_to_the_session(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    calls = claude({"files": {"src/new.py": "x = 1\n"}, "output": [result()]})
+    dispatch.work(FakeApp(ready_api()), replace(cfg, model="claude-opus-5-5"), issue(7))
+    argv = json.loads(calls.read_text())[0]
+    assert argv[argv.index("--model") + 1] == "claude-opus-5-5"
 
 
 @pytest.mark.parametrize(
