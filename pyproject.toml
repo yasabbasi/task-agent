@@ -46,6 +46,7 @@ agent_commands = []
 "yasabbasi/task-agent" = "."
 "yasabbasi/data-pipeline" = "../data-pipeline"
 "yasabbasi/mcp-server" = "../mcp-server"
+"yasabbasi/container-stack" = "../container-stack"
 
 [tool.ruff]
 line-length = 100

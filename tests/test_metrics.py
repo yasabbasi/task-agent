@@ -335,8 +335,8 @@ def test_metrics_command_prints_a_row_per_repo_and_a_total(
     assert lines[0] == f"| {metrics.HEAD} |"
     assert lines[1] == "| --- | --- | --- | --- | --- | --- | --- |"
     assert lines[2] == "| yasabbasi/task-agent | 1 | 10 min | 42 min | $0.57 | $0.57 | 1 |"
-    assert lines[-1] == "| Total | 3 | 10 min | 42 min | $0.57 | $1.71 | 3 |"
-    assert len(lines) == 6
+    assert lines[-1] == "| Total | 4 | 10 min | 42 min | $0.57 | $2.28 | 4 |"
+    assert len(lines) == 7
     read = {"issues": "read", "pull_requests": "read"}
     assert app.asked == [(repo, read) for repo in config.load(text).repos]
     assert not [call for call in app.api.calls if "/issues/2/" in call[1]]
