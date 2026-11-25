@@ -28,13 +28,14 @@ def test_load_reads_the_table_from_text(tmp_path: Path) -> None:
     assert cfg.root == cfg.clone == tmp_path
 
 
-def test_this_repo_configures_itself_and_the_other_two() -> None:
+def test_this_repo_configures_itself_and_the_other_three() -> None:
     cfg = config.load()
     assert cfg.repo == "yasabbasi/task-agent" and cfg.target().clone == ROOT
     assert [repo.split("/")[1] for repo in cfg.repos] == [
         "task-agent",
         "data-pipeline",
         "mcp-server",
+        "container-stack",
     ]
     assert (cfg.max_turns, cfg.budget_usd, cfg.timeout_min) == (40, 3.0, 50)
 

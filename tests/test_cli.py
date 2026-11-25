@@ -141,4 +141,5 @@ def test_dispatch_all_covers_every_configured_repo_with_main_settings(
         ("yasabbasi/task-agent", cli.ROOT, cli.ROOT),
         ("yasabbasi/data-pipeline", code / "data-pipeline", cli.ROOT),
         ("yasabbasi/mcp-server", code / "mcp-server", cli.ROOT),
+        ("yasabbasi/container-stack", code / "container-stack", cli.ROOT),
     ]
