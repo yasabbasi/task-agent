@@ -155,6 +155,13 @@ In containers, the split is the one the loop already has:
 - A separate trusted step, which holds the App's key, checks the session's output and
   publishes it: the commit, the push and the pull request.
 
+When the watcher's environment sets `TASK_AGENT_RUNNER`, its words, split as a shell would,
+go in front of the session and the dependency install: `$TASK_AGENT_RUNNER session claude -p
+...` and `$TASK_AGENT_RUNNER prepare uv sync --locked --quiet`, both run in the worktree. The
+session's settings then turn the OS sandbox off, so the runner must be the box: no network,
+no credentials, nothing but the worktree. The variable is never read from a repo's files and
+is not passed to the session. Unset or empty, both commands run as before.
+
 Not built yet:
 
 - cloning on demand: every repo needs a clone on the machine already

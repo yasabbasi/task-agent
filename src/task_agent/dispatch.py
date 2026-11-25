@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -295,6 +296,12 @@ def discard(cfg: Config, worktree: Path) -> None:
     git(cfg.clone, "worktree", "prune")
 
 
+def runner(step: str) -> list[str]:
+    """The watcher's TASK_AGENT_RUNNER words and the step's name, or nothing when it is unset."""
+    words = shlex.split(os.environ.get("TASK_AGENT_RUNNER", ""))
+    return [*words, step] if words else []
+
+
 def prepare(cfg: Config, number: int, token: str) -> tuple[Path, str]:
     """A fresh worktree of origin/main for one issue, and its .git file to compare later."""
     worktree, branch = cfg.clone / ".worktrees" / f"issue-{number}", f"agent/issue-{number}"
@@ -306,7 +313,7 @@ def prepare(cfg: Config, number: int, token: str) -> tuple[Path, str]:
         if (worktree / name).exists():
             raise Blocked(f"refused to run: the checkout contains {name}")
     if (worktree / "uv.lock").exists():
-        sync = ["uv", "sync", "--locked", "--quiet"]
+        sync = [*runner("prepare"), "uv", "sync", "--locked", "--quiet"]
         subprocess.run(sync, cwd=worktree, check=True, capture_output=True, text=True)
     return worktree, (worktree / ".git").read_text()
 
@@ -358,6 +365,8 @@ def agent_settings(cfg: Config, worktree: Path) -> str:
     settings: Json = json.loads(text)
     extra = config.table(show_main(cfg.clone, "pyproject.toml")).get("agent_commands", [])
     settings["permissions"]["allow"] += [f"Bash({command})" for command in extra]
+    if runner("session"):  # the runner is the box
+        settings["sandbox"] = {"enabled": False}
     return json.dumps(settings)
 
 
@@ -396,7 +405,7 @@ def run_agent(
 ) -> Json:
     """Run claude -p in the worktree, boxed in; return its result message."""
     cmd = [
-        "claude", "-p", prompt,
+        *runner("session"), "claude", "-p", prompt,
         "--restricted", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--strict-mcp-config",
         "--disable-slash-commands", "--permission-mode", "dontAsk", "--permission-prompts", "none",
         "--max-turns", str(cfg.max_turns), "--max-budget-usd", str(cfg.budget_usd),

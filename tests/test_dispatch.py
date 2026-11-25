@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import urllib.error
 from collections.abc import Callable, Iterator
@@ -560,6 +561,73 @@ def test_stream_output_gives_the_result_and_the_init_message(
     argv = json.loads(calls.read_text())[0]
     assert argv[argv.index("--output-format") + 1 :] == ["stream-json", "--verbose"]
     assert list((cfg.root / ".worktrees" / "logs").glob("repo-issue-5-*.json"))
+
+
+FAKE_RUNNER = """#!{python}
+import json, os, pathlib, sys
+log = pathlib.Path(__file__).parent / "runner.json"
+seen = json.loads(log.read_text()) if log.exists() else []
+log.write_text(json.dumps(seen + [[os.getcwd(), sys.argv[1:], sorted(os.environ)]]))
+if sys.argv[2] == "session":
+    os.execvp(sys.argv[3], sys.argv[3:])
+"""
+
+
+def lock_main(cfg: config.Config, github: Path) -> None:
+    (cfg.clone / "uv.lock").write_text("")
+    run_git(cfg.clone, "add", "uv.lock")
+    run_git(cfg.clone, "commit", "--quiet", "-m", "lock")
+    run_git(cfg.clone, "push", "--quiet", str(github), "HEAD:main")
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_without_a_runner_the_install_and_session_run_as_today(
+    cfg: config.Config, github: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is not None:
+        monkeypatch.setenv("TASK_AGENT_RUNNER", value)
+    lock_main(cfg, github)
+    seen, real = list[list[str]](), subprocess.run
+
+    def sync(cmd: list[str], **kwargs: Any) -> Any:
+        if cmd[0] == "git":
+            return real(cmd, **kwargs)
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def session(cmd: list[str], cfg: config.Config, worktree: Path) -> tuple[str, str, int]:
+        seen.append(cmd)
+        return json.dumps(result()), "", 0
+
+    monkeypatch.setattr(subprocess, "run", sync)
+    monkeypatch.setattr(dispatch, "session", session)
+    worktree, _ = dispatch.prepare(cfg, 5, "t")
+    dispatch.run_agent(cfg, worktree, 5, "do it")
+    assert seen[0] == ["uv", "sync", "--locked", "--quiet"]
+    assert seen[1][:3] == ["claude", "-p", "do it"]
+    settings = json.loads(seen[1][seen[1].index("--settings") + 1])
+    assert settings["sandbox"]["enabled"] is True and settings["sandbox"]["failIfUnavailable"]
+
+
+def test_a_runner_goes_in_front_of_the_install_and_the_session_and_owns_the_box(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_main(cfg, github)
+    calls = claude({"output": [result()]})
+    script = calls.parent / "runner"
+    script.write_text(FAKE_RUNNER.format(python=sys.executable))
+    script.chmod(0o755)
+    boxed = json.loads(dispatch.agent_settings(cfg, cfg.clone / ".worktrees" / "issue-5"))
+    monkeypatch.setenv("TASK_AGENT_RUNNER", "runner --flag")
+    worktree, _ = dispatch.prepare(cfg, 5, "t")
+    dispatch.run_agent(cfg, worktree, 5, "do it")
+    (cwd, install, _), (where, argv, env) = json.loads((calls.parent / "runner.json").read_text())
+    assert cwd == where == str(worktree.resolve())
+    assert install == ["--flag", "prepare", "uv", "sync", "--locked", "--quiet"]
+    assert argv[:5] == ["--flag", "session", "claude", "-p", "do it"]
+    assert "TASK_AGENT_RUNNER" not in env
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert settings == boxed | {"sandbox": {"enabled": False}}
 
 
 def test_a_session_gets_a_stripped_environment_and_no_stdin(
