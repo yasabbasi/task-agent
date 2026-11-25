@@ -268,6 +268,21 @@ def test_a_change_to_a_protected_path_is_blocked_before_any_push(
     assert not api.posted("/pulls")
 
 
+def test_a_path_protected_by_the_repo_on_origin_main_is_blocked_before_any_push(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    (cfg.clone / "pyproject.toml").write_text('[tool.task-agent]\nprotected = ["Terraform"]\n')
+    run_git(cfg.clone, "commit", "--quiet", "-am", "protect")
+    run_git(cfg.clone, "push", "--quiet", "origin", "HEAD:main")
+    (cfg.clone / "pyproject.toml").write_text("[tool.task-agent]\n")
+    claude({"files": {"terraform/main.tf": "changed\n"}, "output": [result()]})
+    api = ready_api()
+    assert dispatch.work(FakeApp(api), cfg, issue(7)) == "#7: blocked (nothing was pushed:)"
+    assert "terraform/main.tf" in api.posted("/issues/7/comments")[0]["body"]
+    assert "agent/issue-7" not in run_git(github, "branch", "--list")
+
+
 def test_a_description_that_closes_another_issue_is_blocked_with_a_link_to_the_branch(
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:

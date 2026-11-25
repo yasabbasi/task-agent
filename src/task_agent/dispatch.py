@@ -531,6 +531,7 @@ def publish(
     branch, out = f"agent/issue-{number}", result["structured_output"]
     title, text = one_line(out["pr_title"]), out["pr_body"]
     files = commit(cfg, worktree, api, title, result, (pull or {}).get("unmerged", {}))
+    extra = config.table(show_main(cfg.clone, "pyproject.toml")).get("protected", [])
     notes, done = f"/issues/{(pull or {}).get('number')}/comments", "reworked"
     mark = REWORK.format((pull or {}).get("until"))
     if pull and len(set(git(worktree, "rev-parse", "HEAD", f"origin/{branch}").split())) == 1:
@@ -539,13 +540,13 @@ def publish(
         return "the rework changed nothing, back to status:review"
     for left in (2, 1, 0):
         body = pr_body(text, number, summed(result, (pull or {}).get("body") or ""))
-        found = pr_format.check(title, body, branch, files)
+        found = pr_format.check(title, body, branch, files, extra)
         problems = "\n".join(f"- {p}" for p in found)
         if not (left and found and all(p.startswith("the description") for p in found)):
             break
         recheck(worktree, gitfile, result)
         text = repair(cfg, worktree, number, text, problems, result)
-    if any(pr_format.protected(path) for path in files):
+    if any(pr_format.protected(path, extra) for path in files):
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)

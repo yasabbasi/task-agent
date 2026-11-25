@@ -79,6 +79,11 @@ step at the end of its `gate`. Init warns when the repo is private and its owner
 free plan, because rulesets are not enforced there. Run it again after a new version tag to
 bring the workflows up to date.
 
+A `protected` list there, such as `["terraform", "compose.yaml"]`, adds top-level paths only
+a person may change, compared without case. The dispatcher reads it from `origin/main`.
+For `gate` to apply it, add a step that saves the base branch's `pyproject.toml` and pass
+that file to `task-agent pr-check --config`.
+
 ## When a task is blocked
 
 A task or a rework that fails gets `status:blocked` and a comment that starts with
