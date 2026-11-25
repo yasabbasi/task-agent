@@ -95,6 +95,9 @@ instead of starting over. Common reasons:
 | Nothing was pushed: a file is still unmerged or has a conflict marker | Resolve the conflict on the branch by hand, or retry. |
 | Refused a rework: the branch changes `pyproject.toml`, `uv.lock` or `.python-version` | Take that change off the branch by hand. |
 
+Next to the limits, `model` pins the session's model (passed as `--model`); when it is empty,
+the installed Claude Code's default is used.
+
 A task that is not taken, with no comment, shows in the log instead:
 
 - `not taken`: the latest `status:ready` label isn't the owner's, or the issue was edited

@@ -26,6 +26,7 @@ def test_load_reads_the_table_from_text(tmp_path: Path) -> None:
     assert (cfg.repo, cfg.owner, cfg.name, cfg.bot) == ("o/home", "o", "home", "app[bot]")
     assert (cfg.budget_usd, cfg.max_turns, cfg.agent_commands) == (1.5, 40, ("make sample",))
     assert cfg.root == cfg.clone == tmp_path
+    assert cfg.model == ""
 
 
 def test_this_repo_configures_itself_and_the_other_three() -> None:
