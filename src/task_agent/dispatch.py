@@ -407,11 +407,15 @@ def session(cmd: list[str], cfg: Config, worktree: Path) -> tuple[str, str, int]
             if time.monotonic() >= end:
                 raise Blocked(f"timed out after {cfg.timeout_min} minutes")
     except BaseException:  # a timeout, a cancel, or Ctrl-C while verify runs
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
             with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, sig)
+                os.killpg(proc.pid, signal.SIGTERM)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.communicate(timeout=STOP_SECS)  # a process outside the group may hold a pipe
+        finally:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
         raise
     finally:
         with SESSIONS_LOCK:
@@ -707,7 +711,7 @@ def cancel() -> None:
     with SESSIONS_LOCK:
         CANCEL.set()
         for proc in SESSIONS:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(proc.pid, signal.SIGTERM)
 
 

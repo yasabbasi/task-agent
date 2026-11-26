@@ -232,6 +232,17 @@ def test_a_crash_is_reported_as_a_failed_check(cfg: config.Config) -> None:
     assert results == [(False, "verify stopped early: RuntimeError: no installation")]
 
 
+def test_a_bad_runner_is_reported_before_any_check(
+    cfg: config.Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TASK_AGENT_RUNNER", "no-such-runner --flag")
+    api = FakeApi()
+    results = verify.run(FakeApp(api), cfg)
+    assert len(results) == 1 and results[0][0] is False
+    assert results[0][1].startswith("refusing to run: TASK_AGENT_RUNNER names 'no-such-runner'")
+    assert not api.calls
+
+
 def test_the_watcher_verifies_a_repo_when_a_request_file_asks(
     cfg: config.Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

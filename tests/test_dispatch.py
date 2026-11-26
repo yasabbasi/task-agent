@@ -776,6 +776,110 @@ def test_an_interrupt_on_the_main_thread_stops_the_session_it_was_waiting_for(
     assert started[0].returncode == -signal.SIGTERM and not dispatch.SESSIONS
 
 
+def test_a_second_interrupt_during_the_grace_period_still_ends_in_sigkill(
+    cfg: config.Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started, sent, real = list[subprocess.Popen[str]](), list[int](), os.killpg
+
+    def interrupted(proc: subprocess.Popen[str], *args: Any, **kwargs: Any) -> Any:
+        started.append(proc)
+        raise KeyboardInterrupt
+
+    def killpg(pid: int, sig: int) -> None:
+        sent.append(sig)
+        real(pid, sig)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    monkeypatch.setattr(os, "killpg", killpg)
+    with pytest.raises(KeyboardInterrupt):
+        dispatch.session([sys.executable, "-c", STUBBORN], cfg, tmp_path)
+    assert sent[-1] == signal.SIGKILL and exited(started[0].pid)
+
+
+def test_a_cancel_stops_a_session_that_ignores_sigterm_in_time(
+    cfg: config.Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "CANCEL", threading.Event())
+    monkeypatch.setattr(dispatch, "STOP_SECS", 1)
+    ready, errors = tmp_path / "ready", list[BaseException]()
+    script = STUBBORN.replace("; time.sleep", f"; open({str(ready)!r}, 'w'); time.sleep")
+
+    def run() -> None:
+        try:
+            dispatch.session([sys.executable, "-c", script], cfg, tmp_path)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    for _ in range(100):
+        if ready.exists():
+            break
+        time.sleep(0.05)
+    (proc,), began = list(dispatch.SESSIONS), time.monotonic()
+    dispatch.cancel()
+    thread.join(dispatch.STOP_SECS + 2)
+    assert time.monotonic() - began < dispatch.STOP_SECS + 2 and not thread.is_alive()
+    assert isinstance(errors[0], dispatch.Blocked) and str(errors[0]) == "cancelled"
+    assert exited(proc.pid)
+
+
+def test_cancel_ignores_a_group_it_may_no_longer_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dispatch, "CANCEL", threading.Event())
+    monkeypatch.setattr(dispatch, "SESSIONS", {subprocess.Popen(["true"])})
+
+    def killpg(pid: int, sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "killpg", killpg)
+    dispatch.cancel()
+    assert dispatch.CANCEL.is_set()
+    next(iter(dispatch.SESSIONS)).wait()
+
+
+def test_no_timeout_comes_before_the_session_has_had_its_minutes(
+    cfg: config.Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock, waits = [0.0], list[float]()
+
+    def communicate(proc: subprocess.Popen[str], timeout: float = 0) -> Any:
+        waits.append(clock[0])
+        clock[0] += timeout
+        raise subprocess.TimeoutExpired(proc.args, timeout)
+
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate)
+    monkeypatch.setattr(dispatch, "STOP_SECS", 0)
+    with pytest.raises(dispatch.Blocked, match="timed out after 2 minutes"):
+        dispatch.session(["sleep", "30"], replace(cfg, timeout_min=2), tmp_path)
+    assert waits[:121] == [float(n) for n in range(121)]
+
+
+def test_a_leader_that_exits_on_sigterm_while_a_child_holds_the_pipes_does_not_raise(
+    cfg: config.Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "pid"
+    script = CHILD.format(child="import time; time.sleep(60)", escape=True, pidfile=str(pidfile))
+    script = script.replace("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n", "")
+    monkeypatch.setattr(subprocess.Popen, "communicate", started_child(monkeypatch, pidfile))
+    try:
+        with pytest.raises(dispatch.Blocked, match="timed out"):
+            dispatch.session([sys.executable, "-c", script], replace(cfg, timeout_min=0), tmp_path)
+    finally:
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+def test_the_runner_is_empty_once_the_variable_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_runner(tmp_path)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("TASK_AGENT_RUNNER", "runner --flag")
+    assert dispatch.resolve_runner() == "" and dispatch.RUNNER[1:] == ["--flag"]
+    monkeypatch.delenv("TASK_AGENT_RUNNER")
+    assert dispatch.resolve_runner() == "" and dispatch.RUNNER == []
+
+
 @pytest.mark.parametrize("name", dispatch.REFUSE)
 def test_a_checkout_with_planted_settings_is_refused(
     cfg: config.Config, github: Path, name: str

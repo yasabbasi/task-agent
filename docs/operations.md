@@ -164,12 +164,14 @@ pass stops before claiming anything if that fails. It is never read from a repo'
 passed to the session. Unset or empty, nothing changes. The OS sandbox is then off, so the
 runner must guarantee: the session reaches nothing but the model, through a proxy that holds
 the credentials; it reads nothing outside the worktree and holds no credentials; the
-worktree's `.git` file is read-only; on SIGTERM, or when the runner dies, it stops its
-workload, and no process outlives the command. A timeout or a cancel sends SIGTERM, then
-SIGKILL 10 seconds later.
+worktree's `.git` file is read-only; it takes nothing, such as config or code, from its working
+directory, because the worktree holds files the agent wrote; on SIGTERM, or when the runner
+dies, it stops its workload, and no process outlives the command. A timeout or a cancel sends
+SIGTERM, then SIGKILL 10 seconds later.
 
 Not built yet:
 
 - cloning on demand: every repo needs a clone on the machine already
-- a container mode: sessions rely on the OS sandbox, which is proven only on macOS so far
+- a runner: a runner can be the box, but this repo holds none, so without one sessions rely on
+  the OS sandbox, which is proven only on macOS so far
 - a Linux run of `make verify`
