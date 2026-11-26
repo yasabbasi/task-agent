@@ -1,6 +1,7 @@
 """Checks on an App pull request. gate runs them from main's code, before the change's own."""
 
 import re
+from collections.abc import Collection
 
 ROOT_ONLY = {".github", "prompts", "makefile", "gnumakefile", "pyproject.toml", "uv.lock"}
 ROOT_ONLY |= {".python-version", ".python-versions"}
@@ -43,16 +44,19 @@ def word_count(body: str) -> int:
     return len(re.findall(r"[^\W_]\S*", visible(body, " ")))
 
 
-def protected(path: str) -> bool:
+def protected(path: str, extra: Collection[str] = ()) -> bool:
     """True for a path only a person may change, compared without case as macOS does."""
     parts = path.lower().split("/")
-    return parts[0] in ROOT_ONLY or any(part in ANY_DEPTH for part in parts)
+    root = ROOT_ONLY | {name.lower() for name in extra}
+    return parts[0] in root or any(part in ANY_DEPTH for part in parts)
 
 
-def check(title: str, body: str, branch: str, files: list[str]) -> list[str]:
+def check(
+    title: str, body: str, branch: str, files: list[str], extra: Collection[str] = ()
+) -> list[str]:
     """Problems with an App pull request; an empty list means it passes."""
     problems, body = [], body.replace("\r\n", "\n")
-    if changed := sorted(path for path in files if protected(path)):
+    if changed := sorted(path for path in files if protected(path, extra)):
         problems.append("agent pull requests may not change: " + ", ".join(changed))
     if not (match := BRANCH.fullmatch(branch)):
         return [*problems, f"the branch must be named agent/issue-N, not {branch}"]

@@ -32,14 +32,16 @@ def test_console_script_runs() -> None:
 BOT = "yasabbasi-task-agent[bot]"
 
 
-def pr_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: list[str], **env: str) -> int:
+def pr_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: list[str], *flags: str, **env: str
+) -> int:
     listing = tmp_path / "files.txt"
     listing.write_text("\n".join(files) + "\n")
     values = {"PR_AUTHOR": BOT, "PR_TITLE": "Add a file", "PR_BODY": f"Closes #7\n\n{SECTIONS}"}
     values |= {"PR_BRANCH": "agent/issue-7", "PR_CHANGED_FILES": str(len(files))} | env
     for name, value in values.items():
         monkeypatch.setenv(name, value)
-    return cli.main(["pr-check", "--files", str(listing)])
+    return cli.main(["pr-check", "--files", str(listing), *flags])
 
 
 def test_pr_check_passes_a_clean_app_pull_request(
@@ -66,6 +68,32 @@ def test_pr_check_sees_the_old_name_of_a_renamed_protected_file(
     assert (
         pr_check(monkeypatch, tmp_path, ["docs/rules.md", "CLAUDE.md"], PR_CHANGED_FILES="1") == 1
     )
+
+
+def test_pr_check_applies_the_protected_list_of_a_given_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "base.toml"
+    config.write_text('[tool.task-agent]\nprotected = ["terraform"]\n')
+    assert pr_check(monkeypatch, tmp_path, ["terraform/main.tf"], "--config", str(config)) == 1
+    assert "::error::agent pull requests may not change: terraform/main.tf" in (
+        capsys.readouterr().out
+    )
+
+
+def test_pr_check_fails_on_a_config_whose_protected_value_is_not_a_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "base.toml"
+    config.write_text('[tool.task-agent]\nprotected = "terraform"\n')
+    with pytest.raises(ValueError, match="protected must"):
+        pr_check(monkeypatch, tmp_path, ["terraform/main.tf"], "--config", str(config))
+
+
+def test_pr_check_without_a_config_protects_only_the_usual_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert pr_check(monkeypatch, tmp_path, ["terraform/main.tf"]) == 0
 
 
 @pytest.mark.parametrize("count", ["3", "3000"])

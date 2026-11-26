@@ -48,6 +48,21 @@ def test_agents_may_change_other_paths(path: str) -> None:
     assert not pr_format.protected(path)
 
 
+@pytest.mark.parametrize("path", ["terraform/main.tf", "Terraform/x", "COMPOSE.yaml"])
+def test_a_repo_may_name_extra_protected_paths(path: str) -> None:
+    assert pr_format.protected(path, ["terraform", "Compose.yaml"])
+    assert not pr_format.protected(path)
+
+
+def test_an_extra_protected_name_counts_only_at_the_root() -> None:
+    assert not pr_format.protected("docs/terraform/x.md", ["terraform"])
+
+
+def test_extra_protected_changes_are_named() -> None:
+    problems = pr_format.check("Add", BODY, "agent/issue-7", ["images/a", "src/a.py"], ["images"])
+    assert problems == ["agent pull requests may not change: images/a"]
+
+
 def test_a_pull_request_that_closes_its_own_issue_passes() -> None:
     assert (
         pr_format.check("Add a file", BODY, "agent/issue-7", ["src/a.py", "tests/test_a.py"]) == []

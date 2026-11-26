@@ -34,7 +34,9 @@ def cmd_pr_check(args: argparse.Namespace) -> int:
         return 0
     files = sorted(set(Path(args.files).read_text().splitlines()))
     count = int(env.get("PR_CHANGED_FILES") or 0)
-    problems = pr_format.check(env["PR_TITLE"], env.get("PR_BODY", ""), env["PR_BRANCH"], files)
+    extra = config.protected(config.table(Path(args.config).read_text())) if args.config else ()
+    title, body, branch = env["PR_TITLE"], env.get("PR_BODY", ""), env["PR_BRANCH"]
+    problems = pr_format.check(title, body, branch, files, extra)
     if count >= pr_format.MAX_FILES or len(files) < count:
         problems.append(f"could not list all {count} changed files")
     for problem in problems:
@@ -123,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     ready.add_argument("--event", help="path of a GitHub issues event, inside Actions")
     check = command("pr-check", cmd_pr_check, "check an App pull request, described in PR_*")
     check.add_argument("--files", required=True, help="file listing the changed paths")
+    check.add_argument("--config", help="a pyproject.toml whose protected list applies too")
     closed = command("close-out", cmd_close_out, "tidy up after a merged pull request")
     closed.add_argument("--event", required=True, help="path of a pull_request closed event")
     for parsed in (check, closed):

@@ -528,24 +528,24 @@ def publish(
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)
     api = app.token(cfg.repo, contents="write", pull_requests="write", issues="write")
-    branch, out = f"agent/issue-{number}", result["structured_output"]
-    title, text = one_line(out["pr_title"]), out["pr_body"]
-    files = commit(cfg, worktree, api, title, result, (pull or {}).get("unmerged", {}))
-    notes, done = f"/issues/{(pull or {}).get('number')}/comments", "reworked"
-    mark = REWORK.format((pull or {}).get("until"))
+    branch, out, pull = f"agent/issue-{number}", result["structured_output"], pull or {}
+    title, text, mark = one_line(out["pr_title"]), out["pr_body"], REWORK.format(pull.get("until"))
+    files = commit(cfg, worktree, api, title, result, pull.get("unmerged", {}))
+    extra = config.protected(config.table(show_main(cfg.clone, "pyproject.toml")))
+    notes, done = f"/issues/{pull.get('number')}/comments", "reworked"
     if pull and len(set(git(worktree, "rev-parse", "HEAD", f"origin/{branch}").split())) == 1:
         api("POST", notes, {"body": mark + "The rework session changed nothing."})
         set_status(api, number, "status:review")
         return "the rework changed nothing, back to status:review"
     for left in (2, 1, 0):
-        body = pr_body(text, number, summed(result, (pull or {}).get("body") or ""))
-        found = pr_format.check(title, body, branch, files)
+        body = pr_body(text, number, summed(result, pull.get("body") or ""))
+        found = pr_format.check(title, body, branch, files, extra)
         problems = "\n".join(f"- {p}" for p in found)
         if not (left and found and all(p.startswith("the description") for p in found)):
             break
         recheck(worktree, gitfile, result)
         text = repair(cfg, worktree, number, text, problems, result)
-    if any(pr_format.protected(path) for path in files):
+    if any(pr_format.protected(path, extra) for path in files):
         raise Blocked(f"nothing was pushed:\n\n{problems}", result)
     if (worktree / ".git").read_text() != gitfile:
         raise Blocked("the worktree's .git file was changed", result)
@@ -595,6 +595,7 @@ def work(app: App, cfg: Config, issue: Json) -> str:
         api = app.token(cfg.repo, contents="read", pull_requests="read")
         pull = pull_for(api, cfg, number)
         worktree, gitfile = prepare(cfg, number, api.token)
+        config.protected(config.table(show_main(cfg.clone, "pyproject.toml")))
         if pull:
             review = checkout(cfg, worktree, gitfile, api, pull)
         result = run_agent(cfg, worktree, number, prompt_for(cfg, issue, review))
