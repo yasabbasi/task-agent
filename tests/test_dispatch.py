@@ -275,11 +275,24 @@ def test_a_path_protected_by_the_repo_on_origin_main_is_blocked_before_any_push(
     (cfg.clone / "pyproject.toml").write_text('[tool.task-agent]\nprotected = ["Terraform"]\n')
     run_git(cfg.clone, "commit", "--quiet", "-am", "protect")
     run_git(cfg.clone, "push", "--quiet", "origin", "HEAD:main")
-    (cfg.clone / "pyproject.toml").write_text("[tool.task-agent]\n")
-    claude({"files": {"terraform/main.tf": "changed\n"}, "output": [result()]})
+    files = {"pyproject.toml": "[tool.task-agent]\n", "terraform/main.tf": "changed\n"}
+    claude({"files": files, "output": [result()]})
     api = ready_api()
     assert dispatch.work(FakeApp(api), cfg, issue(7)) == "#7: blocked (nothing was pushed:)"
     assert "terraform/main.tf" in api.posted("/issues/7/comments")[0]["body"]
+    assert "agent/issue-7" not in run_git(github, "branch", "--list")
+
+
+def test_a_bad_protected_list_on_origin_main_blocks_before_any_push(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    (cfg.clone / "pyproject.toml").write_text('[tool.task-agent]\nprotected = "terraform"\n')
+    run_git(cfg.clone, "commit", "--quiet", "-am", "protect")
+    run_git(cfg.clone, "push", "--quiet", "origin", "HEAD:main")
+    claude({"files": {"terraform/main.tf": "changed\n"}, "output": [result()]})
+    line = dispatch.work(FakeApp(ready_api()), cfg, issue(7))
+    assert line.startswith("#7: blocked (ValueError: [tool.task-agent] protected must")
     assert "agent/issue-7" not in run_git(github, "branch", "--list")
 
 
@@ -1192,6 +1205,18 @@ def test_a_file_deleted_on_main_that_the_session_did_not_touch_blocks_with_nothi
     line = dispatch.work(FakeApp(pull_api()), cfg, issue(7))
     assert line == "#7: blocked (nothing was pushed: CLAUDE.md is still unmerged)"
     assert "left these files unmerged: CLAUDE.md." in json.loads(calls.read_text())[0][1]
+    assert run_git(github, "rev-parse", "agent/issue-7").strip() == old
+
+
+def test_a_rework_that_touches_a_path_protected_on_origin_main_is_refused(
+    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
+    main = {"pyproject.toml": '[tool.task-agent]\nprotected = ["terraform"]\n'}
+    old = pushed_branch(cfg, github, {"a.txt": "branch\n"}, **main)
+    claude({"files": {"terraform/main.tf": "changed\n"}, "output": [result()]})
+    line = dispatch.work(FakeApp(pull_api()), cfg, issue(7))
+    assert line == "#7: blocked (nothing was pushed:)"
     assert run_git(github, "rev-parse", "agent/issue-7").strip() == old
 
 

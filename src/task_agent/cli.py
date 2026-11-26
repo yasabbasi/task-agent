@@ -34,9 +34,9 @@ def cmd_pr_check(args: argparse.Namespace) -> int:
         return 0
     files = sorted(set(Path(args.files).read_text().splitlines()))
     count = int(env.get("PR_CHANGED_FILES") or 0)
-    extra = config.table(Path(args.config).read_text()) if args.config else {}
+    extra = config.protected(config.table(Path(args.config).read_text())) if args.config else ()
     title, body, branch = env["PR_TITLE"], env.get("PR_BODY", ""), env["PR_BRANCH"]
-    problems = pr_format.check(title, body, branch, files, extra.get("protected", []))
+    problems = pr_format.check(title, body, branch, files, extra)
     if count >= pr_format.MAX_FILES or len(files) < count:
         problems.append(f"could not list all {count} changed files")
     for problem in problems:

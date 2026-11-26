@@ -23,6 +23,7 @@ class Config:
     timeout_min: int = 50
     model: str = ""
     agent_commands: tuple[str, ...] = ()
+    protected: tuple[str, ...] = ()
     repos: dict[str, str] = field(default_factory=dict)
     root: Path = ROOT
     clone: Path = ROOT
@@ -54,8 +55,19 @@ def table(text: str) -> dict[str, Any]:
     return found
 
 
+def protected(data: dict[str, Any]) -> tuple[str, ...]:
+    """The extra top-level names a [tool.task-agent] table protects; a doubtful one is an error."""
+    found = data.get("protected", [])
+    items = found if isinstance(found, list) else [None]
+    names = [n.removeprefix("./").removesuffix("/") if isinstance(n, str) else "" for n in items]
+    if any(not name or "/" in name or name != name.strip() for name in names):
+        raise ValueError(f"[tool.task-agent] protected must list top-level names, not {found!r}")
+    return tuple(names)
+
+
 def load(text: str | None = None, root: Path = ROOT) -> Config:
     """The settings in this pyproject.toml text, or in the file under root."""
     data = table((root / "pyproject.toml").read_text() if text is None else text)
     data["agent_commands"] = tuple(data.get("agent_commands", ()))
+    data["protected"] = protected(data)
     return Config(**data, root=root, clone=root)

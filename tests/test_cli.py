@@ -81,6 +81,15 @@ def test_pr_check_applies_the_protected_list_of_a_given_config(
     )
 
 
+def test_pr_check_fails_on_a_config_whose_protected_value_is_not_a_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "base.toml"
+    config.write_text('[tool.task-agent]\nprotected = "terraform"\n')
+    with pytest.raises(ValueError, match="protected must"):
+        pr_check(monkeypatch, tmp_path, ["terraform/main.tf"], "--config", str(config))
+
+
 def test_pr_check_without_a_config_protects_only_the_usual_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

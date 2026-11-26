@@ -80,9 +80,10 @@ free plan, because rulesets are not enforced there. Run it again after a new ver
 bring the workflows up to date.
 
 A `protected` list there, such as `["terraform", "compose.yaml"]`, adds top-level paths only
-a person may change, compared without case. The dispatcher reads it from `origin/main`.
-For `gate` to apply it, add a step that saves the base branch's `pyproject.toml` and pass
-that file to `task-agent pr-check --config`.
+a person may change, compared without case. A value that is not a list of top-level names
+is an error: the dispatcher blocks and `pr-check` fails. The dispatcher reads the list from
+`origin/main`, and `gate` applies it when its template passes the base branch's
+`pyproject.toml` to `task-agent pr-check --config`.
 
 ## When a task is blocked
 
