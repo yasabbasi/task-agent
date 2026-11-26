@@ -595,6 +595,7 @@ def work(app: App, cfg: Config, issue: Json) -> str:
         api = app.token(cfg.repo, contents="read", pull_requests="read")
         pull = pull_for(api, cfg, number)
         worktree, gitfile = prepare(cfg, number, api.token)
+        config.protected(config.table(show_main(cfg.clone, "pyproject.toml")))
         if pull:
             review = checkout(cfg, worktree, gitfile, api, pull)
         result = run_agent(cfg, worktree, number, prompt_for(cfg, issue, review))

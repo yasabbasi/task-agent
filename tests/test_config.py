@@ -54,9 +54,15 @@ def test_target_aims_at_a_configured_repo_or_a_given_clone(tmp_path: Path) -> No
         cfg.target("o/new")
 
 
-def test_load_accepts_a_protected_list(tmp_path: Path) -> None:
+def test_load_accepts_a_protected_list_but_keeps_no_copy(tmp_path: Path) -> None:
     text = TEXT.replace("budget_usd", 'protected = ["./terraform/"]\nbudget_usd')
-    assert config.load(text, tmp_path).protected == ("terraform",)
+    assert not hasattr(config.load(text, tmp_path), "protected")
+
+
+def test_load_refuses_a_bad_protected_list(tmp_path: Path) -> None:
+    text = TEXT.replace("budget_usd", 'protected = ["*"]\nbudget_usd')
+    with pytest.raises(ValueError, match="protected must"):
+        config.load(text, tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -74,7 +80,9 @@ def test_protected_strips_a_leading_dot_slash_and_a_trailing_slash(
 
 
 @pytest.mark.parametrize(
-    "value", ['"terraform"', '{ a = "b" }', "3", '["infra/prod"]', '[""]', '[" x"]', '["/"]', "[1]"]
+    "value",
+    ['"terraform"', '{ a = "b" }', "3", '["infra/prod"]', '[""]', '[" x"]', '["/"]', "[1]"]
+    + ['["*"]', '["tf?"]', '["[ab]"]', "['a\\b']", '["."]', '[".."]', '["./"]'],
 )
 def test_a_protected_value_that_is_not_a_list_of_top_level_names_is_an_error(value: str) -> None:
     with pytest.raises(ValueError, match=r"\[tool.task-agent\] protected must"):

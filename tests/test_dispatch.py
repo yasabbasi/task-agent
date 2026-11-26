@@ -275,6 +275,7 @@ def test_a_path_protected_by_the_repo_on_origin_main_is_blocked_before_any_push(
     (cfg.clone / "pyproject.toml").write_text('[tool.task-agent]\nprotected = ["Terraform"]\n')
     run_git(cfg.clone, "commit", "--quiet", "-am", "protect")
     run_git(cfg.clone, "push", "--quiet", "origin", "HEAD:main")
+    (cfg.clone / "pyproject.toml").write_text("[tool.task-agent]\n")
     files = {"pyproject.toml": "[tool.task-agent]\n", "terraform/main.tf": "changed\n"}
     claude({"files": files, "output": [result()]})
     api = ready_api()
@@ -283,16 +284,17 @@ def test_a_path_protected_by_the_repo_on_origin_main_is_blocked_before_any_push(
     assert "agent/issue-7" not in run_git(github, "branch", "--list")
 
 
-def test_a_bad_protected_list_on_origin_main_blocks_before_any_push(
+def test_a_bad_protected_list_on_origin_main_blocks_before_any_session(
     cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(dispatch, "claim", lambda api, number, bot: 42)
     (cfg.clone / "pyproject.toml").write_text('[tool.task-agent]\nprotected = "terraform"\n')
     run_git(cfg.clone, "commit", "--quiet", "-am", "protect")
     run_git(cfg.clone, "push", "--quiet", "origin", "HEAD:main")
-    claude({"files": {"terraform/main.tf": "changed\n"}, "output": [result()]})
+    calls = claude({"files": {"terraform/main.tf": "changed\n"}, "output": [result()]})
     line = dispatch.work(FakeApp(ready_api()), cfg, issue(7))
     assert line.startswith("#7: blocked (ValueError: [tool.task-agent] protected must")
+    assert not calls.exists()
     assert "agent/issue-7" not in run_git(github, "branch", "--list")
 
 
