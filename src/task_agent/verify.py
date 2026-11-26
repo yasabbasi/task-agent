@@ -175,6 +175,8 @@ def session_checks(cfg: Config, token: str) -> list[Result]:
 
 def run(app: App, cfg: Config, pr: int | None = None, sessions: bool = True) -> list[Result]:
     """Every check for one repo; a check that crashes is reported as a failure."""
+    if reason := dispatch.resolve_runner():  # the session checks must test the passes' box
+        return [(False, reason)]
     results: list[Result] = []
     try:
         api = app.token(cfg.repo, contents="write", pull_requests="write", issues="write")

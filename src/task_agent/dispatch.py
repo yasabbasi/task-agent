@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -38,6 +39,8 @@ GIT_LOCK = threading.Lock()  # fetch, worktree add and worktree remove take git'
 CANCEL = threading.Event()
 SESSIONS: set[subprocess.Popen[str]] = set()
 SESSIONS_LOCK = threading.Lock()
+STOP_SECS = 10
+RUNNER: list[str] = []
 PINNED = ("pyproject.toml", "uv.lock", ".python-version")
 REWORK = "<!-- task-agent:rework until={} -->\n"
 REWORK_RE = re.compile(r"<!-- task-agent:rework(?: until=(\S+))? -->\n")
@@ -295,6 +298,23 @@ def discard(cfg: Config, worktree: Path) -> None:
     git(cfg.clone, "worktree", "prune")
 
 
+def resolve_runner() -> str:
+    """Set RUNNER from TASK_AGENT_RUNNER, its program made absolute; return why it can't be."""
+    try:
+        words = shlex.split(os.environ.get("TASK_AGENT_RUNNER", ""))
+    except ValueError as exc:
+        return f"refusing to run: TASK_AGENT_RUNNER can't be split ({exc})"
+    if words and not (found := shutil.which(words[0]) or ""):
+        return f"refusing to run: TASK_AGENT_RUNNER names {words[0]!r}, which is not on PATH"
+    RUNNER[:] = [os.path.abspath(found), *words[1:]] if words else []
+    return ""
+
+
+def runner(step: str) -> list[str]:
+    """The resolved runner's words and the step's name, or nothing without a runner."""
+    return [*RUNNER, step] if RUNNER else []
+
+
 def prepare(cfg: Config, number: int, token: str) -> tuple[Path, str]:
     """A fresh worktree of origin/main for one issue, and its .git file to compare later."""
     worktree, branch = cfg.clone / ".worktrees" / f"issue-{number}", f"agent/issue-{number}"
@@ -306,7 +326,7 @@ def prepare(cfg: Config, number: int, token: str) -> tuple[Path, str]:
         if (worktree / name).exists():
             raise Blocked(f"refused to run: the checkout contains {name}")
     if (worktree / "uv.lock").exists():
-        sync = ["uv", "sync", "--locked", "--quiet"]
+        sync = [*runner("prepare"), "uv", "sync", "--locked", "--quiet"]
         subprocess.run(sync, cwd=worktree, check=True, capture_output=True, text=True)
     return worktree, (worktree / ".git").read_text()
 
@@ -358,6 +378,8 @@ def agent_settings(cfg: Config, worktree: Path) -> str:
     settings: Json = json.loads(text)
     extra = config.table(show_main(cfg.clone, "pyproject.toml")).get("agent_commands", [])
     settings["permissions"]["allow"] += [f"Bash({command})" for command in extra]
+    if runner("session"):  # the runner is the box
+        settings["sandbox"] = {"enabled": False}
     return json.dumps(settings)
 
 
@@ -374,14 +396,26 @@ def session(cmd: list[str], cfg: Config, worktree: Path) -> tuple[str, str, int]
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )  # fmt: skip
         SESSIONS.add(proc)
+    end = time.monotonic() + cfg.timeout_min * 60
     try:
-        stdout, stderr = proc.communicate(timeout=cfg.timeout_min * 60)
-    except BaseException as exc:  # a timeout, or Ctrl-C while verify runs on the main thread
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        if isinstance(exc, subprocess.TimeoutExpired):
-            raise Blocked(f"timed out after {cfg.timeout_min} minutes") from exc
+        while True:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                stdout, stderr = proc.communicate(timeout=max(0, min(1, end - time.monotonic())))
+                break
+            if CANCEL.is_set():
+                raise Blocked("cancelled")
+            if time.monotonic() >= end:
+                raise Blocked(f"timed out after {cfg.timeout_min} minutes")
+    except BaseException:  # a timeout, a cancel, or Ctrl-C while verify runs
+        try:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.communicate(timeout=STOP_SECS)  # a process outside the group may hold a pipe
+        finally:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
         raise
     finally:
         with SESSIONS_LOCK:
@@ -396,7 +430,7 @@ def run_agent(
 ) -> Json:
     """Run claude -p in the worktree, boxed in; return its result message."""
     cmd = [
-        "claude", "-p", prompt,
+        *runner("session"), "claude", "-p", prompt,
         "--restricted", "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--strict-mcp-config",
         "--disable-slash-commands", "--permission-mode", "dontAsk", "--permission-prompts", "none",
         "--max-turns", str(cfg.max_turns), "--max-budget-usd", str(cfg.budget_usd),
@@ -677,7 +711,7 @@ def cancel() -> None:
     with SESSIONS_LOCK:
         CANCEL.set()
         for proc in SESSIONS:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(proc.pid, signal.SIGTERM)
 
 
@@ -704,7 +738,7 @@ def run_pass(
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return out("another pass is running")
-        if reason := stale(app, base):
+        if reason := resolve_runner() or stale(app, base):
             return out(reason)
         for cfg in targets:
 

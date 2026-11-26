@@ -88,6 +88,8 @@ def approval(title: str = "t", body: str = "", who: str = "owner", **extra: Any)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Calls outside a repo, such as looking up the bot's user id, get a canned answer."""
     monkeypatch.setattr(dispatch, "call", lambda method, path, token, body=None: {"id": 42})
+    monkeypatch.delenv("TASK_AGENT_RUNNER", raising=False)
+    monkeypatch.setattr(dispatch, "RUNNER", [])
 
 
 @pytest.fixture
