@@ -151,16 +151,22 @@ labels, claim comments and pull requests. The watcher only repeats it and holds 
 
 In containers, the split is the one the loop already has:
 
-- The session runs in a container with the checkout, no network and no credentials.
+- The session runs in a container with the checkout, reaching only the model, with no
+  credentials.
 - A separate trusted step, which holds the App's key, checks the session's output and
   publishes it: the commit, the push and the pull request.
 
 When the watcher's environment sets `TASK_AGENT_RUNNER`, its words, split as a shell would,
 go in front of the session and the dependency install: `$TASK_AGENT_RUNNER session claude -p
-...` and `$TASK_AGENT_RUNNER prepare uv sync --locked --quiet`, both run in the worktree. The
-session's settings then turn the OS sandbox off, so the runner must be the box: no network,
-no credentials, nothing but the worktree. The variable is never read from a repo's files and
-is not passed to the session. Unset or empty, both commands run as before.
+...` and `$TASK_AGENT_RUNNER prepare uv sync --locked --quiet`, both run in the worktree. Its
+first word is found once per pass on the watcher's own `PATH` and working directory, and the
+pass stops before claiming anything if that fails. It is never read from a repo's files or
+passed to the session. Unset or empty, nothing changes. The OS sandbox is then off, so the
+runner must guarantee: the session reaches nothing but the model, through a proxy that holds
+the credentials; it reads nothing outside the worktree and holds no credentials; the
+worktree's `.git` file is read-only; on SIGTERM, or when the runner dies, it stops its
+workload, and no process outlives the command. A timeout or a cancel sends SIGTERM, then
+SIGKILL 10 seconds later.
 
 Not built yet:
 

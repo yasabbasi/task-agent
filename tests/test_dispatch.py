@@ -2,9 +2,11 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -568,8 +570,9 @@ import json, os, pathlib, sys
 log = pathlib.Path(__file__).parent / "runner.json"
 seen = json.loads(log.read_text()) if log.exists() else []
 log.write_text(json.dumps(seen + [[os.getcwd(), sys.argv[1:], sorted(os.environ)]]))
-if sys.argv[2] == "session":
-    os.execvp(sys.argv[3], sys.argv[3:])
+if "session" in sys.argv:
+    at = sys.argv.index("session") + 1
+    os.execvp(sys.argv[at], sys.argv[at:])
 """
 
 
@@ -586,6 +589,7 @@ def test_without_a_runner_the_install_and_session_run_as_today(
 ) -> None:
     if value is not None:
         monkeypatch.setenv("TASK_AGENT_RUNNER", value)
+    assert dispatch.resolve_runner() == ""
     lock_main(cfg, github)
     seen, real = list[list[str]](), subprocess.run
 
@@ -609,25 +613,130 @@ def test_without_a_runner_the_install_and_session_run_as_today(
     assert settings["sandbox"]["enabled"] is True and settings["sandbox"]["failIfUnavailable"]
 
 
+def fake_runner(where: Path) -> Path:
+    script = where / "runner"
+    script.write_text(FAKE_RUNNER.format(python=sys.executable))
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.parametrize(
+    ("value", "flag"), [("runner --flag", "--flag"), ("runner '-f x'", "-f x")]
+)
 def test_a_runner_goes_in_front_of_the_install_and_the_session_and_owns_the_box(
-    cfg: config.Config, github: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+    cfg: config.Config,
+    github: Path,
+    claude: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    flag: str,
 ) -> None:
     lock_main(cfg, github)
     calls = claude({"output": [result()]})
-    script = calls.parent / "runner"
-    script.write_text(FAKE_RUNNER.format(python=sys.executable))
-    script.chmod(0o755)
+    fake_runner(calls.parent)
     boxed = json.loads(dispatch.agent_settings(cfg, cfg.clone / ".worktrees" / "issue-5"))
-    monkeypatch.setenv("TASK_AGENT_RUNNER", "runner --flag")
+    monkeypatch.setenv("TASK_AGENT_RUNNER", value)
+    assert dispatch.resolve_runner() == ""
     worktree, _ = dispatch.prepare(cfg, 5, "t")
     dispatch.run_agent(cfg, worktree, 5, "do it")
     (cwd, install, _), (where, argv, env) = json.loads((calls.parent / "runner.json").read_text())
     assert cwd == where == str(worktree.resolve())
-    assert install == ["--flag", "prepare", "uv", "sync", "--locked", "--quiet"]
-    assert argv[:5] == ["--flag", "session", "claude", "-p", "do it"]
+    assert install == [flag, "prepare", "uv", "sync", "--locked", "--quiet"]
+    assert argv[:5] == [flag, "session", "claude", "-p", "do it"]
     assert "TASK_AGENT_RUNNER" not in env
     settings = json.loads(argv[argv.index("--settings") + 1])
     assert settings == boxed | {"sandbox": {"enabled": False}}
+
+
+def test_a_relative_runner_is_found_from_the_watcher_never_in_the_worktree(
+    cfg: config.Config, tmp_path: Path, claude: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = claude({"output": [result()]})
+    fake_runner(calls.parent)
+    monkeypatch.chdir(calls.parent)
+    monkeypatch.setenv("TASK_AGENT_RUNNER", "./runner")
+    assert dispatch.resolve_runner() == ""
+    monkeypatch.chdir(tmp_path)
+    worktree, _ = dispatch.prepare(cfg, 5, "t")
+    planted = worktree / "runner"
+    planted.write_text(f"#!/bin/sh\ntouch {tmp_path / 'planted'}\n")
+    planted.chmod(0o755)
+    dispatch.run_agent(cfg, worktree, 5, "do it")
+    assert (calls.parent / "runner.json").exists() and not (tmp_path / "planted").exists()
+
+
+@pytest.mark.parametrize("value", ["no-such-runner --flag", "runner '--flag"])
+def test_a_runner_that_cannot_be_found_or_split_stops_the_pass(
+    cfg: config.Config, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("TASK_AGENT_RUNNER", value)
+    api, lines = FakeApi(), list[str]()
+    monkeypatch.setattr(dispatch, "stale", lambda app, base: "")
+    dispatch.run_pass(FakeApp(api), cfg, [cfg], out=lines.append)
+    assert len(lines) == 1 and lines[0].startswith("refusing to run: TASK_AGENT_RUNNER")
+    assert not api.calls and dispatch.RUNNER == []
+
+
+def started_child(monkeypatch: pytest.MonkeyPatch, pidfile: Path) -> Callable[..., tuple[str, str]]:
+    """A communicate that times out once the session's child has written its pid."""
+    real = subprocess.Popen.communicate
+    monkeypatch.setattr(dispatch, "STOP_SECS", 0.5)
+
+    def timed_out(proc: subprocess.Popen[str], *args: Any, **kwargs: Any) -> tuple[str, str]:
+        if not pidfile.exists() or not pidfile.read_text():
+            for _ in range(100):
+                if pidfile.exists() and pidfile.read_text():
+                    break
+                time.sleep(0.05)
+            raise subprocess.TimeoutExpired(proc.args, 0)
+        return real(proc, *args, **kwargs)
+
+    return timed_out
+
+
+def exited(pid: int) -> bool:
+    for _ in range(40):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+CHILD = """import os, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", {child!r}], start_new_session={escape})
+open({pidfile!r}, "w").write(str(child.pid))
+time.sleep(60)
+"""
+STUBBORN = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+
+
+def test_a_runner_child_that_ignores_sigterm_is_gone_after_the_timeout(
+    cfg: config.Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "pid"
+    script = CHILD.format(child=STUBBORN, escape=False, pidfile=str(pidfile))
+    monkeypatch.setattr(subprocess.Popen, "communicate", started_child(monkeypatch, pidfile))
+    with pytest.raises(dispatch.Blocked, match="timed out"):
+        dispatch.session([sys.executable, "-c", script], replace(cfg, timeout_min=0), tmp_path)
+    assert exited(int(pidfile.read_text()))
+
+
+def test_a_child_that_holds_the_pipes_open_does_not_stall_the_session(
+    cfg: config.Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "pid"
+    script = CHILD.format(child="import time; time.sleep(60)", escape=True, pidfile=str(pidfile))
+    monkeypatch.setattr(subprocess.Popen, "communicate", started_child(monkeypatch, pidfile))
+    began = time.monotonic()
+    try:
+        with pytest.raises(dispatch.Blocked, match="timed out"):
+            dispatch.session([sys.executable, "-c", script], replace(cfg, timeout_min=0), tmp_path)
+        assert time.monotonic() - began < 15
+    finally:
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
 
 
 def test_a_session_gets_a_stripped_environment_and_no_stdin(
@@ -664,7 +773,7 @@ def test_an_interrupt_on_the_main_thread_stops_the_session_it_was_waiting_for(
     monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
     with pytest.raises(KeyboardInterrupt):
         dispatch.session(["sleep", "30"], cfg, tmp_path)
-    assert started[0].returncode == -9 and not dispatch.SESSIONS
+    assert started[0].returncode == -signal.SIGTERM and not dispatch.SESSIONS
 
 
 @pytest.mark.parametrize("name", dispatch.REFUSE)
